@@ -28,6 +28,45 @@ interface ScopedModelItem {
 
 type ModelScope = "all" | "scoped";
 
+type DisplayRow =
+	| { type: "header"; provider: string; count: number }
+	| { type: "model"; model: Model<any>; originalIndex: number };
+
+function buildDisplayRows(models: ModelItem[]): DisplayRow[] {
+	const rows: DisplayRow[] = [];
+	const byProvider = new Map<string, ModelItem[]>();
+
+	for (const item of models) {
+		const items = byProvider.get(item.provider) || [];
+		items.push(item);
+		byProvider.set(item.provider, items);
+	}
+
+	for (const [provider, items] of byProvider) {
+		rows.push({ type: "header", provider, count: items.length });
+		for (const item of items) {
+			rows.push({ type: "model", model: item.model, originalIndex: models.indexOf(item) });
+		}
+	}
+
+	return rows;
+}
+
+function getDisplayIndexForModelIndex(rows: DisplayRow[], modelIndex: number): number {
+	let currentDisplay = 0;
+	for (const row of rows) {
+		if (row.type === "model" && row.originalIndex === modelIndex) {
+			return currentDisplay;
+		}
+		currentDisplay++;
+	}
+	return 0;
+}
+
+function countModelRows(rows: DisplayRow[]): number {
+	return rows.filter((r) => r.type === "model").length;
+}
+
 /**
  * Component that renders a model selector with search
  */
@@ -182,12 +221,16 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
 		const sorted = [...models];
-		// Sort: current model first, then by provider
+		const currentProvider = this.currentModel?.provider;
 		sorted.sort((a, b) => {
 			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
 			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
 			if (aIsCurrent && !bIsCurrent) return -1;
 			if (!aIsCurrent && bIsCurrent) return 1;
+			if (currentProvider) {
+				if (a.provider === currentProvider && b.provider !== currentProvider) return -1;
+				if (a.provider !== currentProvider && b.provider === currentProvider) return 1;
+			}
 			return a.provider.localeCompare(b.provider);
 		});
 		return sorted;
@@ -230,57 +273,69 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private updateList(): void {
 		this.listContainer.clear();
 
-		const maxVisible = 10;
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredModels.length - maxVisible),
-		);
-		const endIndex = Math.min(startIndex + maxVisible, this.filteredModels.length);
-
-		// Show visible slice of filtered models
-		for (let i = startIndex; i < endIndex; i++) {
-			const item = this.filteredModels[i];
-			if (!item) continue;
-
-			const isSelected = i === this.selectedIndex;
-			const isCurrent = modelsAreEqual(this.currentModel, item.model);
-
-			let line = "";
-			if (isSelected) {
-				const prefix = theme.fg("accent", "→ ");
-				const modelText = `${item.id}`;
-				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-				line = `${prefix + theme.fg("accent", modelText)} ${providerBadge}${checkmark}`;
+		if (this.filteredModels.length === 0) {
+			if (this.errorMessage) {
+				const errorLines = this.errorMessage.split("\n");
+				for (const line of errorLines) {
+					this.listContainer.addChild(new Text(theme.fg("error", line), 0, 0));
+				}
 			} else {
-				const modelText = `  ${item.id}`;
-				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
-				line = `${modelText} ${providerBadge}${checkmark}`;
+				this.listContainer.addChild(new Text(theme.fg("muted", " No matching models"), 0, 0));
 			}
+			return;
+		}
 
-			this.listContainer.addChild(new Text(line, 0, 0));
+		const rows = buildDisplayRows(this.filteredModels);
+		const maxVisible = 12;
+		const displayIndex = getDisplayIndexForModelIndex(rows, this.selectedIndex);
+
+		// Calculate scroll window
+		const startIndex = Math.max(0, Math.min(displayIndex - Math.floor(maxVisible / 2), rows.length - maxVisible));
+		const endIndex = Math.min(startIndex + maxVisible, rows.length);
+
+		// Render visible rows
+		for (let i = startIndex; i < endIndex; i++) {
+			const row = rows[i];
+			if (!row) continue;
+
+			if (row.type === "header") {
+				const headerText = theme.fg("muted", `▶ ${row.provider} (${row.count})`);
+				this.listContainer.addChild(new Text(headerText, 0, 0));
+			} else {
+				const isSelected = row.originalIndex === this.selectedIndex;
+				const isCurrent = modelsAreEqual(this.currentModel, row.model);
+
+				let line = "";
+				if (isSelected) {
+					const prefix = theme.fg("accent", "→ ");
+					const modelText = `${row.model.id}`;
+					const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
+					line = `${prefix + theme.fg("accent", modelText)}${checkmark}`;
+				} else {
+					const modelText = `  ${row.model.id}`;
+					const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
+					line = `${modelText}${checkmark}`;
+				}
+
+				this.listContainer.addChild(new Text(line, 0, 0));
+			}
 		}
 
 		// Add scroll indicator if needed
-		if (startIndex > 0 || endIndex < this.filteredModels.length) {
-			const scrollInfo = theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredModels.length})`);
+		const modelCount = countModelRows(rows);
+		const modelIndex = this.filteredModels.findIndex(
+			(m) => m.model === this.filteredModels[this.selectedIndex]?.model,
+		);
+		if (startIndex > 0 || endIndex < rows.length) {
+			const scrollInfo = theme.fg("muted", ` (${modelIndex + 1}/${modelCount})`);
 			this.listContainer.addChild(new Text(scrollInfo, 0, 0));
 		}
 
-		// Show error message or "no results" if empty
-		if (this.errorMessage) {
-			// Show error in red
-			const errorLines = this.errorMessage.split("\n");
-			for (const line of errorLines) {
-				this.listContainer.addChild(new Text(theme.fg("error", line), 0, 0));
-			}
-		} else if (this.filteredModels.length === 0) {
-			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
-		} else {
-			const selected = this.filteredModels[this.selectedIndex];
+		// Show model details
+		const selected = this.filteredModels[this.selectedIndex];
+		if (selected) {
 			this.listContainer.addChild(new Spacer(1));
-			this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
+			this.listContainer.addChild(new Text(theme.fg("muted", ` Model Name: ${selected.model.name}`), 0, 0));
 		}
 	}
 

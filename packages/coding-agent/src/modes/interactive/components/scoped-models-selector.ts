@@ -68,6 +68,31 @@ interface ModelItem {
 	enabled: boolean;
 }
 
+type DisplayRow =
+	| { type: "header"; provider: string; count: number }
+	| { type: "model"; item: ModelItem; originalIndex: number };
+
+function buildDisplayRows(items: ModelItem[]): DisplayRow[] {
+	const rows: DisplayRow[] = [];
+	const byProvider = new Map<string, ModelItem[]>();
+
+	for (const item of items) {
+		const provider = item.model.provider;
+		const providerItems = byProvider.get(provider) || [];
+		providerItems.push(item);
+		byProvider.set(provider, providerItems);
+	}
+
+	for (const [provider, providerItems] of byProvider) {
+		rows.push({ type: "header", provider, count: providerItems.length });
+		for (const item of providerItems) {
+			rows.push({ type: "model", item, originalIndex: items.indexOf(item) });
+		}
+	}
+
+	return rows;
+}
+
 export interface ModelsConfig {
 	allModels: Model<any>[];
 	enabledModelIds: string[] | null;
@@ -105,7 +130,6 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	private listContainer: Container;
 	private footerText: Text;
 	private callbacks: ModelsCallbacks;
-	private maxVisible = 15;
 	private isDirty = false;
 
 	constructor(config: ModelsConfig, callbacks: ModelsCallbacks) {
@@ -163,8 +187,8 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		const countText = allEnabled ? "all enabled" : `${enabledCount}/${this.allIds.length} enabled`;
 		const parts = ["Enter toggle", "^A all", "^X clear", "^P provider", "Alt+↑↓ reorder", "^S save", countText];
 		return this.isDirty
-			? theme.fg("dim", `  ${parts.join(" · ")} `) + theme.fg("warning", "(unsaved)")
-			: theme.fg("dim", `  ${parts.join(" · ")}`);
+			? theme.fg("dim", ` ${parts.join(" · ")} `) + theme.fg("warning", "(unsaved)")
+			: theme.fg("dim", ` ${parts.join(" · ")}`);
 	}
 
 	private refresh(): void {
@@ -184,38 +208,55 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		this.listContainer.clear();
 
 		if (this.filteredItems.length === 0) {
-			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
+			this.listContainer.addChild(new Text(theme.fg("muted", " No matching models"), 0, 0));
 			return;
 		}
 
-		const startIndex = Math.max(
-			0,
-			Math.min(this.selectedIndex - Math.floor(this.maxVisible / 2), this.filteredItems.length - this.maxVisible),
-		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.filteredItems.length);
+		const rows = buildDisplayRows(this.filteredItems);
+		const maxVisible = 17;
+
+		// Find display index for selected model
+		let displayIndex = 0;
+		for (const row of rows) {
+			if (row.type === "model" && row.originalIndex === this.selectedIndex) {
+				break;
+			}
+			displayIndex++;
+		}
+
+		// Calculate scroll window
+		const startIndex = Math.max(0, Math.min(displayIndex - Math.floor(maxVisible / 2), rows.length - maxVisible));
+		const endIndex = Math.min(startIndex + maxVisible, rows.length);
 		const allEnabled = this.enabledIds === null;
 
+		// Render visible rows
 		for (let i = startIndex; i < endIndex; i++) {
-			const item = this.filteredItems[i]!;
-			const isSelected = i === this.selectedIndex;
-			const prefix = isSelected ? theme.fg("accent", "→ ") : "  ";
-			const modelText = isSelected ? theme.fg("accent", item.model.id) : item.model.id;
-			const providerBadge = theme.fg("muted", ` [${item.model.provider}]`);
-			const status = allEnabled ? "" : item.enabled ? theme.fg("success", " ✓") : theme.fg("dim", " ✗");
-			this.listContainer.addChild(new Text(`${prefix}${modelText}${providerBadge}${status}`, 0, 0));
+			const row = rows[i];
+			if (!row) continue;
+
+			if (row.type === "header") {
+				const headerText = theme.fg("muted", `▶ ${row.provider} (${row.count})`);
+				this.listContainer.addChild(new Text(headerText, 0, 0));
+			} else {
+				const isSelected = row.originalIndex === this.selectedIndex;
+				const prefix = isSelected ? theme.fg("accent", "→ ") : "  ";
+				const modelText = isSelected ? theme.fg("accent", row.item.model.id) : row.item.model.id;
+				const status = allEnabled ? "" : row.item.enabled ? theme.fg("success", " ✓") : theme.fg("dim", " ✗");
+				this.listContainer.addChild(new Text(`${prefix}${modelText}${status}`, 0, 0));
+			}
 		}
 
 		// Add scroll indicator if needed
-		if (startIndex > 0 || endIndex < this.filteredItems.length) {
+		if (startIndex > 0 || endIndex < rows.length) {
 			this.listContainer.addChild(
-				new Text(theme.fg("muted", `  (${this.selectedIndex + 1}/${this.filteredItems.length})`), 0, 0),
+				new Text(theme.fg("muted", ` (${this.selectedIndex + 1}/${this.filteredItems.length})`), 0, 0),
 			);
 		}
 
 		if (this.filteredItems.length > 0) {
 			const selected = this.filteredItems[this.selectedIndex];
 			this.listContainer.addChild(new Spacer(1));
-			this.listContainer.addChild(new Text(theme.fg("muted", `  Model Name: ${selected.model.name}`), 0, 0));
+			this.listContainer.addChild(new Text(theme.fg("muted", ` Model Name: ${selected.model.name}`), 0, 0));
 		}
 	}
 
