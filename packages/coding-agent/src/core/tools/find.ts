@@ -1,11 +1,10 @@
 import { createInterface } from "node:readline";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
 import { Text } from "@mariozechner/pi-tui";
-import { type Static, Type } from "@sinclair/typebox";
 import { spawn } from "child_process";
 import { existsSync } from "fs";
-import { glob } from "glob";
 import path from "path";
+import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.js";
 import { ensureTool } from "../../utils/tools-manager.js";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.js";
@@ -225,40 +224,29 @@ export function createFindToolDefinition(
 							return;
 						}
 
-						// Build fd arguments.
+						// Build fd arguments. --no-require-git makes fd apply hierarchical .gitignore
+						// semantics whether or not the search path is inside a git repository, without
+						// leaking sibling-directory rules the way --ignore-file (a global source) would.
 						const args: string[] = [
 							"--glob",
 							"--color=never",
 							"--hidden",
+							"--no-require-git",
 							"--max-results",
 							String(effectiveLimit),
 						];
-						// Include .gitignore files from the search tree.
-						const gitignoreFiles = new Set<string>();
-						const rootGitignore = path.join(searchPath, ".gitignore");
-						if (existsSync(rootGitignore)) gitignoreFiles.add(rootGitignore);
-						try {
-							const nestedGitignores = await glob("**/.gitignore", {
-								cwd: searchPath,
-								dot: true,
-								absolute: true,
-								ignore: ["**/node_modules/**", "**/.git/**"],
-								signal,
-							});
-							for (const file of nestedGitignores) gitignoreFiles.add(file);
-						} catch {
-							if (signal?.aborted) {
-								settle(() => reject(new Error("Operation aborted")));
-								return;
+
+						// fd --glob matches against the basename unless --full-path is set; in --full-path
+						// mode it matches against the absolute candidate path, so a path-containing
+						// pattern like 'src/**/*.spec.ts' needs a leading '**/' to match anything.
+						let effectivePattern = pattern;
+						if (pattern.includes("/")) {
+							args.push("--full-path");
+							if (!pattern.startsWith("/") && !pattern.startsWith("**/") && pattern !== "**") {
+								effectivePattern = `**/${pattern}`;
 							}
-							// ignore
 						}
-						if (signal?.aborted) {
-							settle(() => reject(new Error("Operation aborted")));
-							return;
-						}
-						for (const gitignorePath of gitignoreFiles) args.push("--ignore-file", gitignorePath);
-						args.push(pattern, searchPath);
+						args.push(effectivePattern, searchPath);
 
 						const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
 						const rl = createInterface({ input: child.stdout });
@@ -380,7 +368,3 @@ export function createFindToolDefinition(
 export function createFindTool(cwd: string, options?: FindToolOptions): AgentTool<typeof findSchema> {
 	return wrapToolDefinition(createFindToolDefinition(cwd, options));
 }
-
-/** Default find tool using process.cwd() for backwards compatibility. */
-export const findToolDefinition = createFindToolDefinition(process.cwd());
-export const findTool = createFindTool(process.cwd());

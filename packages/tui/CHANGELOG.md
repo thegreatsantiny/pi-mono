@@ -1,6 +1,49 @@
 # Changelog
 
-## [Unreleased]
+## [0.70.0] - 2026-04-23
+
+### Fixed
+
+- Kept OSC 9;4 terminal progress alive with periodic updates so Ghostty does not clear the indicator during long-running agent work ([#3610](https://github.com/badlogic/pi-mono/issues/3610))
+
+## [0.69.0] - 2026-04-22
+
+### Added
+
+- Added `setProgress(active: boolean)` to the `Terminal` interface for OSC 9;4 progress indicator support
+- Added generic stacked autocomplete support for extension wrappers via `AutocompleteProvider.shouldTriggerFileCompletion?()` and `#` as a natural autocomplete trigger alongside `@` ([#2983](https://github.com/badlogic/pi-mono/issues/2983))
+
+## [0.68.1] - 2026-04-22
+
+### Fixed
+
+- Fixed `@` autocomplete fuzzy search to follow symlinked directories and include symlinked paths in results ([#3507](https://github.com/badlogic/pi-mono/issues/3507))
+
+## [0.68.0] - 2026-04-20
+
+### Added
+
+- Added `LoaderIndicatorOptions` and `Loader.setIndicator()` support for custom loader frames and animation intervals, allowing TUI consumers to use animated, static, or hidden loader indicators ([#3413](https://github.com/badlogic/pi-mono/issues/3413))
+
+### Fixed
+
+- Fixed `@` autocomplete fuzzy search to stop matching against the full base path for plain queries, so worktree or cwd paths containing the query text no longer crowd out real results such as `@plan` suggestions ([#2778](https://github.com/badlogic/pi-mono/issues/2778))
+- Fixed xterm `modifyOtherKeys` printable input so shifted uppercase letters insert correctly in the editor and shifted letter bindings parse and match consistently ([#3436](https://github.com/badlogic/pi-mono/issues/3436))
+
+## [0.67.68] - 2026-04-17
+
+## [0.67.67] - 2026-04-17
+
+## [0.67.6] - 2026-04-16
+
+### Added
+
+- Added OSC 8 hyperlink rendering for markdown links when the terminal advertises support. Introduces a public `hyperlink(text, url)` helper and a `setCapabilities()` test override in `packages/tui` ([#3248](https://github.com/badlogic/pi-mono/pull/3248) by [@ofa1](https://github.com/ofa1)).
+- Added `argumentHint` to `SlashCommand` interface, displayed before the description in the autocomplete dropdown ([#2780](https://github.com/badlogic/pi-mono/pull/2780) by [@andresvi94](https://github.com/andresvi94))
+
+### Changed
+
+- Tightened `detectCapabilities()` to default `hyperlinks: false` for unknown terminals and to force `hyperlinks: false` under tmux/screen (including nested sessions where the outer terminal would otherwise advertise OSC 8). Prevents markdown link URLs from disappearing on terminals that silently swallow OSC 8 sequences ([#3248](https://github.com/badlogic/pi-mono/pull/3248)).
 
 ## [0.67.5] - 2026-04-16
 
