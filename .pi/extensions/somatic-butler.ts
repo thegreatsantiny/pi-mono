@@ -459,9 +459,10 @@ function persistState(state: SomaticState): void {
 }
 
 function applyPerTurnDecay(state: SomaticState): void {
-	state.painLevel = Math.round(state.painLevel * PAIN_DECAY_PER_TURN);
-	state.satisfactionLevel = Math.round(state.satisfactionLevel * SATISFACTION_DECAY_PER_TURN);
+	state.painLevel = Math.round(Math.min(100, state.painLevel) * PAIN_DECAY_PER_TURN);
+	state.satisfactionLevel = Math.round(Math.min(100, state.satisfactionLevel) * SATISFACTION_DECAY_PER_TURN);
 	state.fatigueLevel = Math.min(100, state.fatigueLevel + 2);
+	state.urgencyLevel = Math.min(100, state.urgencyLevel);
 
 	// Decay individual pain patterns
 	for (const pattern of state.painPatterns) {
@@ -473,11 +474,12 @@ function applyPerTurnDecay(state: SomaticState): void {
 // ─── System Prompt Injection ───────────────────────────────────────────
 
 function renderBar(label: string, value: number, max = 100): string {
+	const clamped = Math.max(0, Math.min(max, value));
 	const width = 10;
-	const filled = Math.round((value / max) * width);
+	const filled = Math.round((clamped / max) * width);
 	const empty = width - filled;
 	const bar = "█".repeat(filled) + "░".repeat(empty);
-	return `${label}: ${bar} ${value}/${max}`;
+	return `${label}: ${bar} ${clamped}/${max}`;
 }
 
 function buildButlerStateBlock(identity: ButlerIdentity, state: SomaticState, heartbeat: HeartbeatState): string {
@@ -781,7 +783,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		try {
 			const usage = ctx.getContextUsage();
 			if (usage && typeof usage.percent === "number") {
-				state.urgencyLevel = Math.round(usage.percent * 100);
+				state.urgencyLevel = Math.round(Math.min(100, usage.percent));
 			}
 		} catch {
 			// getContextUsage may return null after compaction
