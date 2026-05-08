@@ -94,6 +94,14 @@ function getPurposePath(): string {
 	return path.join(getBaseDir(), ".pi", "butlers", "purpose.txt");
 }
 
+function getMemoryPath(): string {
+	return path.join(getButlerDir(), "memory.md");
+}
+
+function getUserProfilePath(): string {
+	return path.join(getButlerDir(), "user-profile.md");
+}
+
 // ─── Identity ─────────────────────────────────────────────────────────────
 
 function loadOrCreateIdentity(): ButlerIdentity {
@@ -128,6 +136,66 @@ function loadOrCreateIdentity(): ButlerIdentity {
 
 function persistIdentity(identity: ButlerIdentity): void {
 	fs.writeFileSync(getIdentityPath(), JSON.stringify(identity, null, 2), "utf-8");
+}
+
+// ─── Memory ───────────────────────────────────────────────────────────────
+
+const DEFAULT_MEMORY = `# Pennyworth-G0-Alfred — Memory
+
+## Environment
+- Machine: (not yet discovered)
+- Key dirs: (not yet discovered)
+- Active providers: (not yet discovered)
+
+## Conventions
+- (none recorded yet)
+
+## Lessons Learned
+- (none recorded yet)
+
+## Active Gaps
+- (none identified yet)
+`;
+
+const DEFAULT_USER_PROFILE = `# User Profile — Shaun
+
+## Preferences
+- (not yet discovered)
+
+## Communication Style
+- (not yet discovered)
+
+## Working Patterns
+- (not yet discovered)
+`;
+
+const MEMORY_CAPACITY = 2000;
+const USER_PROFILE_CAPACITY = 1000;
+
+function loadOrCreateMemory(): string {
+	const memPath = getMemoryPath();
+	if (fs.existsSync(memPath)) {
+		return fs.readFileSync(memPath, "utf-8");
+	}
+	fs.writeFileSync(memPath, DEFAULT_MEMORY, "utf-8");
+	return DEFAULT_MEMORY;
+}
+
+function loadOrCreateUserProfile(): string {
+	const profilePath = getUserProfilePath();
+	if (fs.existsSync(profilePath)) {
+		return fs.readFileSync(profilePath, "utf-8");
+	}
+	fs.writeFileSync(profilePath, DEFAULT_USER_PROFILE, "utf-8");
+	return DEFAULT_USER_PROFILE;
+}
+
+function persistMemory(content: string): void {
+	fs.writeFileSync(getMemoryPath(), content, "utf-8");
+}
+
+function persistUserProfile(content: string): void {
+	fs.writeFileSync(getUserProfilePath(), content, "utf-8");
 }
 
 // ─── Somatic State ────────────────────────────────────────────────────────
@@ -266,10 +334,14 @@ function timeSince(isoTimestamp: string): string {
 export default function somaticButlerExtension(pi: ExtensionAPI) {
 	let identity: ButlerIdentity;
 	let state: SomaticState;
+	let memory: string;
+	let userProfile: string;
 
 	pi.on("session_start", async (_event, ctx) => {
 		identity = loadOrCreateIdentity();
 		state = loadOrCreateState();
+		memory = loadOrCreateMemory();
+		userProfile = loadOrCreateUserProfile();
 
 		// Replay in-session state entries to reconstruct branch-correct state
 		try {
@@ -384,6 +456,8 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		persistIdentity(identity);
 		persistState(state);
+		persistMemory(memory);
+		persistUserProfile(userProfile);
 
 		// Note: we don't have a notify here — context may be gone
 		console.log(`[somatic-butler] ${identity.fullName} is going to sleep.`);
@@ -391,6 +465,18 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 	pi.on("before_agent_start", async (event) => {
 		const stateBlock = buildButlerStateBlock(identity, state);
-		return { systemPrompt: event.systemPrompt + "\n\n" + stateBlock };
+
+		// Build memory injection
+		let memoryBlock = "";
+		if (memory.trim()) {
+			const memUsage = `${memory.length}/${MEMORY_CAPACITY}`;
+			memoryBlock += `\n\n═══ BUTLER MEMORY (${memUsage} chars) ═══\n${memory.trim()}\n═══ END BUTLER MEMORY ═══`;
+		}
+		if (userProfile.trim()) {
+			const profileUsage = `${userProfile.length}/${USER_PROFILE_CAPACITY}`;
+			memoryBlock += `\n\n═══ USER PROFILE (${profileUsage} chars) ═══\n${userProfile.trim()}\n═══ END USER PROFILE ═══`;
+		}
+
+		return { systemPrompt: event.systemPrompt + "\n\n" + stateBlock + memoryBlock };
 	});
 }
