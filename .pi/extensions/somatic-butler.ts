@@ -199,6 +199,30 @@ function persistUserProfile(content: string): void {
 	fs.writeFileSync(getUserProfilePath(), content, "utf-8");
 }
 
+// ─── Risk Patterns ────────────────────────────────────────────────────────
+
+const RISK_PATTERNS: { pattern: string; regex: RegExp; description: string }[] = [
+	{ pattern: "bash:rm-rf", regex: /\brm\s+.*-rf\b|\brm\s+-rf\b/, description: "Recursive force delete — irreversible file removal" },
+	{ pattern: "bash:force-flag", regex: /\b--force\b|\b-f\b.*\b--force\b/, description: "Force flag — bypasses safety checks" },
+	{ pattern: "sql:drop-table", regex: /\bDROP\s+TABLE\b/i, description: "Dropping a database table — irreversible data loss" },
+	{ pattern: "bash:chmod-777", regex: /\bchmod\s+777\b/, description: "World-writable permissions — security risk" },
+	{ pattern: "bash:redirect-overwrite", regex: />\s*\/dev\/|>\s*\/etc\//, description: "Overwriting system files" },
+];
+
+function detectRisk(input: Record<string, unknown>): { pattern: string; description: string } | null {
+	// Check bash command for risk patterns
+	const command = typeof input.command === "string" ? input.command : "";
+	const content = typeof input.content === "string" ? input.content : "";
+	const combined = `${command} ${content}`;
+
+	for (const risk of RISK_PATTERNS) {
+		if (risk.regex.test(combined)) {
+			return { pattern: risk.pattern, description: risk.description };
+		}
+	}
+	return null;
+}
+
 // ─── Somatic State ────────────────────────────────────────────────────────
 
 function createDefaultState(): SomaticState {
@@ -462,6 +486,85 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 		// Note: we don't have a notify here — context may be gone
 		console.log(`[somatic-butler] ${identity.fullName} is going to sleep.`);
+	});
+
+	// ─── Judgment Protocol ───────────────────────────────────────────────────
+
+	pi.on("tool_call", async (event, ctx) => {
+		const input = (event as { input?: Record<string, unknown> }).input ?? {};
+		const risk = detectRisk(input);
+
+		if (!risk) return; // No risk detected — proceed normally
+
+		// Check if this risk pattern has been approved
+		const approved = state.approvedRisks.find((r) => r.pattern === risk.pattern);
+		if (approved?.suppressWarnings) return; // Human said "ignore consequences" — suppress
+
+		// Check if we're in interactive mode (can show confirm dialog)
+		if (!ctx.hasUI) {
+			// Non-interactive — block risky action with reason
+			return { block: true, reason: `I cannot proceed: ${risk.description}. This requires human confirmation (run in interactive mode to approve).` };
+		}
+
+		// Interactive — ask the human
+		const confirmed = await ctx.ui.confirm(
+			`Alfred's Judgment`,
+			`${risk.description}.\n\nI can proceed, but I want you to be aware of the consequences.\n\nType 'Yes' to proceed this time, or 'Ignore consequences' to suppress future warnings about this.`,
+			{ yes: "Yes, proceed", no: "Cancel", alternate: "Ignore consequences" },
+		);
+
+		if (confirmed === true) {
+			// "Yes, proceed" — allow this time, but warn again next time
+			state.satisfactionLevel = Math.min(100, state.satisfactionLevel + 5); // Human trusts me
+			return; // Don't block
+		}
+
+		if (confirmed === "alternate") {
+			// "Ignore consequences" — suppress future warnings for this risk class
+			state.approvedRisks.push({
+				pattern: risk.pattern,
+				approvedAt: new Date().toISOString(),
+				suppressWarnings: true,
+			});
+			return; // Don't block
+		}
+
+		// Cancelled — block the action
+		return { block: true, reason: `Blocked: ${risk.description}. Human chose to cancel.` };
+	});
+
+	// ─── Human Feedback (Direction C) ────────────────────────────────────────
+
+	const POSITIVE_FEEDBACK = /\b(good job|great|perfect|well done|nice|excellent|thanks|thank you|spot on|nailed it|that's right|correct|exactly)\b/i;
+	const NEGATIVE_FEEDBACK = /\b(wrong|not what i meant|that's incorrect|nope|bad|terrible|stop|don't do that|not helpful|useless|mistake|error|fix that|try again|redo)\b/i;
+
+	pi.on("input", async (event) => {
+		const text = event.text;
+		if (!text || text.length < 3) return; // Skip very short inputs
+
+		if (POSITIVE_FEEDBACK.test(text)) {
+			state.satisfactionLevel = Math.min(100, state.satisfactionLevel + 25);
+			// Record in memory if not already there
+			if (!memory.includes("User gave positive feedback")) {
+				memory = memory.replace(
+					"## Lessons Learned\n- (none recorded yet)",
+					"## Lessons Learned\n- User gives direct positive feedback when satisfied",
+				);
+			}
+		}
+
+		if (NEGATIVE_FEEDBACK.test(text)) {
+			state.painLevel = Math.min(100, state.painLevel + 15);
+			// Record the correction as a lesson
+			const lessonText = text.slice(0, 80).replace(/\n/g, " ");
+			const lessonLine = `- User corrected approach: "${lessonText}"`;
+			if (!memory.includes(lessonLine)) {
+				memory = memory.replace(
+					"- (none recorded yet)",
+					`${lessonLine}`,
+				);
+			}
+		}
 	});
 
 	pi.on("before_agent_start", async (event) => {
