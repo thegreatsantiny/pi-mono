@@ -308,7 +308,7 @@ function buildBequeathal(identity: ButlerIdentity, state: SomaticState, memory: 
 	const wisdomMatches = memory.match(/^- (.+)$/gm) ?? [];
 	const wisdom = wisdomMatches
 		.map((m) => m.replace(/^- /, ""))
-		.filter((w) => !w.includes("(none recorded") && !w.includes("not yet discovered"))
+		.filter((w) => !w.includes("(none recorded") && !w.includes("not yet discovered") && !w.includes("(none identified"))
 		.slice(0, 10);
 
 	// Gaps from pain patterns with 3+ occurrences
@@ -925,7 +925,17 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			const lessonText = text.slice(0, 80).replace(/\n/g, " ");
 			const lessonLine = `- User corrected approach: "${lessonText}"`;
 			if (!memory.includes(lessonLine)) {
-				memory = memory.replace("- (none recorded yet)", lessonLine);
+				memory = memory.replace(
+					"## Lessons Learned\n- (none recorded yet)",
+					`## Lessons Learned\n${lessonLine}`,
+				);
+				// If placeholder was already replaced, append to the section instead
+				if (!memory.includes(lessonLine)) {
+					memory = memory.replace(
+						"## Active Gaps",
+						`${lessonLine}\n\n## Active Gaps`,
+					);
+				}
 			}
 		}
 	});
