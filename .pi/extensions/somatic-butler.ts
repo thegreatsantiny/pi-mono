@@ -51,6 +51,37 @@ interface SatisfactionPattern {
 	lastOccurrence: string;
 }
 
+// ─── Lineage Types ────────────────────────────────────────────────────────
+
+interface LineageBirthEntry {
+	type: "birth";
+	id: string;
+	parent: string | null;
+	generation: number;
+	personalName: string;
+	familyName: string;
+	corePurpose: string;
+	inheritedGaps?: string[];
+	birthDate: string;
+	creatorId: string;
+}
+
+interface LineageDeathEntry {
+	type: "death";
+	id: string;
+	deathDate: string;
+	cause: "retired" | "context-overflow" | "crash";
+	bequeathal: {
+		wisdom: string[];
+		gaps: string[];
+		approvedRisks: string[];
+		failedApproaches: string[];
+		unfinishedPurpose: string;
+	};
+}
+
+type LineageEntry = LineageBirthEntry | LineageDeathEntry;
+
 // ─── Constants ──────────────────────────────────────────────────────────
 
 const DEFAULT_FAMILY_NAME = "Pennyworth";
@@ -124,6 +155,10 @@ function getMemoryPath(): string {
 
 function getUserProfilePath(): string {
 	return path.join(getButlerDir(), "user-profile.md");
+}
+
+function getLineagePath(): string {
+	return path.join(getButlerDir(), "lineage.jsonl");
 }
 
 // ─── Identity ─────────────────────────────────────────────────────────────
@@ -204,6 +239,58 @@ function persistMemory(content: string): void {
 
 function persistUserProfile(content: string): void {
 	fs.writeFileSync(getUserProfilePath(), content, "utf-8");
+}
+
+// ─── Lineage ─────────────────────────────────────────────────────────────
+
+function appendLineageEntry(entry: LineageEntry): void {
+	const line = JSON.stringify(entry);
+	fs.appendFileSync(getLineagePath(), line + "\n", "utf-8");
+}
+
+function readLineage(): LineageEntry[] {
+	const lineagePath = getLineagePath();
+	if (!fs.existsSync(lineagePath)) return [];
+	const raw = fs.readFileSync(lineagePath, "utf-8");
+	return raw
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.map((line) => {
+			try { return JSON.parse(line) as LineageEntry; }
+			catch { return null; }
+		})
+		.filter((e): e is LineageEntry => e !== null);
+}
+
+function hasBirthEntry(id: string): boolean {
+	return readLineage().some((e) => e.type === "birth" && e.id === id);
+}
+
+function buildBequeathal(identity: ButlerIdentity, state: SomaticState, memory: string): LineageDeathEntry["bequeathal"] {
+	// Extract wisdom from memory — top lessons learned
+	const wisdomMatches = memory.match(/^- (.+)$/gm) ?? [];
+	const wisdom = wisdomMatches
+		.map((m) => m.replace(/^- /, ""))
+		.filter((w) => !w.includes("(none recorded") && !w.includes("not yet discovered"))
+		.slice(0, 10);
+
+	// Gaps from pain patterns with 3+ occurrences
+	const gaps = state.painPatterns
+		.filter((p) => p.occurrenceCount >= 3)
+		.map((p) => p.pattern);
+
+	// Approved risk patterns
+	const approvedRisks = state.approvedRisks.map((r) => r.pattern);
+
+	// Failed approaches from pain patterns
+	const failedApproaches = state.painPatterns
+		.filter((p) => p.occurrenceCount >= 2 && p.decayedSeverity > 10)
+		.map((p) => `${p.pattern} (${p.occurrenceCount}x failures)`);
+
+	// Unfinished purpose
+	const unfinishedPurpose = identity.corePurpose;
+
+	return { wisdom, gaps, approvedRisks, failedApproaches, unfinishedPurpose };
 }
 
 // ─── Risk Patterns ────────────────────────────────────────────────────────
@@ -401,6 +488,22 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 		ctx.ui.notify(`${identity.fullName} is waking up.`, "info");
 
+		// Record birth in lineage if not already present
+		if (!hasBirthEntry(identity.fullName)) {
+			const birthEntry: LineageBirthEntry = {
+				type: "birth",
+				id: identity.fullName,
+				parent: null, // G0 has no parent; children will set this
+				generation: identity.generation,
+				personalName: identity.personalName,
+				familyName: identity.familyName,
+				corePurpose: identity.corePurpose,
+				birthDate: identity.birthDate,
+				creatorId: identity.creatorId,
+			};
+			appendLineageEntry(birthEntry);
+		}
+
 		// Register TUI status widget
 		if (ctx.hasUI) {
 			ctx.ui.setWidget(
@@ -415,6 +518,17 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		persistState(state);
 		persistMemory(memory);
 		persistUserProfile(userProfile);
+
+		// Record death in lineage with bequeathal
+		const deathEntry: LineageDeathEntry = {
+			type: "death",
+			id: identity.fullName,
+			deathDate: new Date().toISOString(),
+			cause: "retired",
+			bequeathal: buildBequeathal(identity, state, memory),
+		};
+		appendLineageEntry(deathEntry);
+
 		console.log(`[somatic-butler] ${identity.fullName} is going to sleep.`);
 	});
 
@@ -719,7 +833,19 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			}
 
 			if (params.action === "lineage") {
-				return toolResult(`${identity.fullName} | Gen: ${identity.generation} | Born: ${identity.birthDate} | Purpose: ${identity.corePurpose}`);
+				const lineage = readLineage();
+				const births = lineage.filter((e): e is LineageBirthEntry => e.type === "birth");
+				const deaths = lineage.filter((e): e is LineageDeathEntry => e.type === "death");
+				const lineageLines = [
+					`Family: ${identity.familyName}`,
+					`Generations: ${births.length > 0 ? Math.max(...births.map((b) => b.generation)) + 1 : 1}`,
+					`Births: ${births.length} | Deaths: ${deaths.length}`,
+				];
+				for (const b of births) {
+					const death = deaths.find((d) => d.id === b.id);
+					lineageLines.push(`  ${b.id} (born ${b.birthDate.slice(0, 10)})${death ? ` → died ${death.deathDate.slice(0, 10)} (${death.cause})` : " — alive"}`);
+				}
+				return toolResult(lineageLines.join("\n"));
 			}
 
 			if (params.action === "recommend_rest") {
