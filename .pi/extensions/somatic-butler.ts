@@ -187,6 +187,14 @@ function applyPerTurnDecay(state: SomaticState): void {
 	state.painLevel = Math.round(state.painLevel * PAIN_DECAY_PER_TURN);
 	state.satisfactionLevel = Math.round(state.satisfactionLevel * SATISFACTION_DECAY_PER_TURN);
 	state.fatigueLevel = Math.min(100, state.fatigueLevel + 2); // Fatigue grows with each turn
+
+	// Decay individual pain patterns
+	for (const pattern of state.painPatterns) {
+		pattern.decayedSeverity = Math.round(pattern.decayedSeverity * PAIN_DECAY_PER_TURN);
+	}
+
+	// Remove patterns that have fully decayed
+	state.painPatterns = state.painPatterns.filter((p) => p.decayedSeverity > 0);
 }
 
 // ─── System Prompt Injection ───────────────────────────────────────────
