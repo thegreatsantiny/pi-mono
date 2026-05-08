@@ -29,6 +29,7 @@ interface SomaticState {
 	approvedRisks: ApprovedRiskPattern[];
 	painPatterns: PainPattern[];
 	satisfactionPatterns: SatisfactionPattern[];
+	_overflowDeathWritten?: boolean;
 }
 
 interface ApprovedRiskPattern {
@@ -763,16 +764,9 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		persistMemory(memory);
 		persistUserProfile(userProfile);
 
-		// Record death in lineage with bequeathal
-		const deathEntry: LineageDeathEntry = {
-			type: "death",
-			id: identity.fullName,
-			deathDate: new Date().toISOString(),
-			cause: "retired",
-			bequeathal: buildBequeathal(identity, state, memory),
-		};
-		appendLineageEntry(deathEntry);
-
+		// Regular shutdown = sleep, not death.
+		// Death (with bequeathal) only happens on explicit retirement or context overflow.
+		// The butler wakes up next session with the same identity and accumulated state.
 		console.log(`[somatic-butler] ${identity.fullName} is going to sleep.`);
 	});
 
@@ -858,6 +852,20 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			);
 		} catch {
 			// appendEntry may not be available
+		}
+
+		// Check for context overflow — if urgency >= 90%, write emergency bequeathal
+		// so wisdom is preserved even if the session crashes on the next turn
+		if (state.urgencyLevel >= 90 && !state._overflowDeathWritten) {
+			const deathEntry: LineageDeathEntry = {
+				type: "death",
+				id: identity.fullName,
+				deathDate: new Date().toISOString(),
+				cause: "context-overflow",
+				bequeathal: buildBequeathal(identity, state, memory),
+			};
+			appendLineageEntry(deathEntry);
+			state._overflowDeathWritten = true;
 		}
 
 		// Update TUI widget
