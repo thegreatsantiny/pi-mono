@@ -68,6 +68,23 @@ const PAIN_DECAY_BETWEEN_SESSIONS = 0.5;
 // In-session tracking
 const STATE_ENTRY_TYPE = "butler-state";
 
+// ─── Heartbeat ──────────────────────────────────────────────────────────
+
+const HEARTBEAT_WINDOW = 5; // Rolling window of last N tool calls for breath detection
+
+type BreathPhase = "inhaling" | "exhaling" | "steady";
+
+interface HeartbeatState {
+	recentToolNames: string[]; // Rolling window of tool names
+	currentPhase: BreathPhase;
+	turnIndex: number;
+}
+
+// Tools that indicate information gathering (inhaling)
+const INHALE_TOOLS = new Set(["read", "ls", "find", "grep", "glob"]);
+// Tools that indicate output production (exhaling)
+const EXHALE_TOOLS = new Set(["write", "edit", "bash"]);
+
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 function getBaseDir(): string {
@@ -300,11 +317,12 @@ function renderBar(label: string, value: number, max = 100): string {
 	return `${label}: ${bar} ${value}/${max}`;
 }
 
-function buildButlerStateBlock(identity: ButlerIdentity, state: SomaticState): string {
+function buildButlerStateBlock(identity: ButlerIdentity, state: SomaticState, heartbeat: HeartbeatState): string {
 	const lines: string[] = [
 		"═══ BUTLER STATE ═══",
 		`Name: ${identity.fullName} | Gen: ${identity.generation} | Session turn: ${state.turnsThisSession}`,
 		`Purpose: ${identity.corePurpose}`,
+		`Breath: ${heartbeat.currentPhase}${heartbeat.currentPhase === "inhaling" ? " — taking in information, prioritize reading and understanding" : heartbeat.currentPhase === "exhaling" ? " — producing output, focus on completing and delivering" : ""}`,
 		"",
 		renderBar("Pain       ", state.painLevel),
 		renderBar("Fatigue    ", state.fatigueLevel),
@@ -361,6 +379,11 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	let state: SomaticState;
 	let memory: string;
 	let userProfile: string;
+	let heartbeat: HeartbeatState = {
+		recentToolNames: [],
+		currentPhase: "steady",
+		turnIndex: 0,
+	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		identity = loadOrCreateIdentity();
@@ -402,6 +425,17 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		}
 
 		ctx.ui.notify(`${identity.fullName} is waking up.`, "info");
+
+		// Register TUI status widget
+		if (ctx.hasUI) {
+			const updateWidget = () => {
+				ctx.ui.setWidget(
+					"butler-status",
+					[`${identity.fullName} [${heartbeat.currentPhase}] | P:${state.painLevel} F:${state.fatigueLevel} U:${state.urgencyLevel} S:${state.satisfactionLevel}`],
+				);
+			};
+			updateWidget();
+		}
 	});
 
 	pi.on("turn_start", async (_event, ctx) => {
@@ -419,6 +453,34 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", async (event) => {
+		const toolName = (event as { toolName?: string }).toolName ?? "unknown";
+
+		// Update heartbeat — track tool name for breath phase detection
+		heartbeat.recentToolNames.push(toolName);
+		if (heartbeat.recentToolNames.length > HEARTBEAT_WINDOW) {
+			heartbeat.recentToolNames.shift();
+		}
+
+		// Determine breath phase from rolling window
+		const inhaleCount = heartbeat.recentToolNames.filter((t) => INHALE_TOOLS.has(t)).length;
+		const exhaleCount = heartbeat.recentToolNames.filter((t) => EXHALE_TOOLS.has(t)).length;
+		if (inhaleCount > exhaleCount + 1) {
+			heartbeat.currentPhase = "inhaling";
+		} else if (exhaleCount > inhaleCount + 1) {
+			heartbeat.currentPhase = "exhaling";
+		} else {
+			heartbeat.currentPhase = "steady";
+		}
+
+		// Emit heartbeat event for other systems to subscribe to
+		try {
+			(pi as unknown as { events: { emit: (channel: string, data: unknown) => void } }).events.emit(
+				"butler:heartbeat",
+				{ phase: heartbeat.currentPhase, turn: heartbeat.turnIndex },
+			);
+		} catch {
+			// events.emit may not be available
+		}
 		const toolName = (event as { toolName?: string }).toolName ?? "unknown";
 
 		if (event.isError) {
@@ -464,7 +526,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("turn_end", async () => {
+	pi.on("turn_end", async (_event, ctx) => {
 		applyPerTurnDecay(state);
 
 		// Persist to in-session appendEntry for branch-correct tracking
@@ -475,6 +537,14 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			);
 		} catch {
 			// appendEntry may not be available in all pi versions
+		}
+
+		// Update TUI widget
+		if (ctx?.hasUI) {
+			ctx.ui.setWidget(
+				"butler-status",
+				[`${identity.fullName} [${heartbeat.currentPhase}] | P:${state.painLevel} F:${state.fatigueLevel} U:${state.urgencyLevel} S:${state.satisfactionLevel}`],
+			);
 		}
 	});
 
@@ -568,7 +638,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("before_agent_start", async (event) => {
-		const stateBlock = buildButlerStateBlock(identity, state);
+		const stateBlock = buildButlerStateBlock(identity, state, heartbeat);
 
 		// Build memory injection
 		let memoryBlock = "";
@@ -699,7 +769,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		parameters: butlerAssessSchema,
 		execute: async (_toolCallId, params: ButlerAssessInput, _signal, _onUpdate, _ctx) => {
 			if (params.action === "state") {
-				return { output: `${identity.fullName} — Somatic State:\n${buildButlerStateBlock(identity, state)}` };
+				return { output: `${identity.fullName} — Somatic State:\n${buildButlerStateBlock(identity, state, heartbeat)}` };
 			}
 
 			if (params.action === "gaps") {
@@ -731,5 +801,27 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 			return { output: `Unknown assessment action: ${params.action}` };
 		},
+	});
+
+	// ─── /alfred Command ──────────────────────────────────────────────────────
+
+	pi.registerCommand("alfred", {
+		description: "Ask Alfred for his current assessment",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) return;
+			const stateBlock = buildButlerStateBlock(identity, state, heartbeat);
+			ctx.ui.notify(stateBlock, "info");
+		},
+	});
+
+	// ─── Compaction Handler (Nap) ─────────────────────────────────────────────
+
+	pi.on("session_compact", async (_event, ctx) => {
+		// Compaction = a nap. Reduce fatigue.
+		state.fatigueLevel = Math.max(0, state.fatigueLevel - 40);
+		state.lastCompactionAt = state.turnsThisSession;
+		if (ctx?.hasUI) {
+			ctx.ui.notify(`${identity.fullName} took a nap. Fatigue reduced.`, "info");
+		}
 	});
 }
