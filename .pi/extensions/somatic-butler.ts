@@ -76,7 +76,7 @@ function getBaseDir(): string {
 	return process.cwd();
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────
+// ─── Path Helpers ─────────────────────────────────────────────────────────
 
 function getButlerDir(): string {
 	return path.join(getBaseDir(), ".pi", "butlers", DEFAULT_FAMILY_NAME.toLowerCase());
@@ -189,6 +189,70 @@ function applyPerTurnDecay(state: SomaticState): void {
 	state.fatigueLevel = Math.min(100, state.fatigueLevel + 2); // Fatigue grows with each turn
 }
 
+// ─── System Prompt Injection ───────────────────────────────────────────
+
+function renderBar(label: string, value: number, max = 100): string {
+	const width = 10;
+	const filled = Math.round((value / max) * width);
+	const empty = width - filled;
+	const bar = "█".repeat(filled) + "░".repeat(empty);
+	return `${label}: ${bar} ${value}/${max}`;
+}
+
+function buildButlerStateBlock(identity: ButlerIdentity, state: SomaticState): string {
+	const lines: string[] = [
+		"═══ BUTLER STATE ═══",
+		`Name: ${identity.fullName} | Gen: ${identity.generation} | Session turn: ${state.turnsThisSession}`,
+		`Purpose: ${identity.corePurpose}`,
+		"",
+		renderBar("Pain       ", state.painLevel),
+		renderBar("Fatigue    ", state.fatigueLevel),
+		renderBar("Urgency    ", state.urgencyLevel),
+		renderBar("Satisfaction", state.satisfactionLevel),
+	];
+
+	// Active drives — only show when relevant
+	const drives: string[] = [];
+	if (state.painLevel > 40) drives.push("Cautious — recent difficulties. Verify before acting.");
+	if (state.fatigueLevel > 50) drives.push("Fatigued — consider compaction (a nap) if context pressure rises.");
+	if (state.urgencyLevel > 50) drives.push("Focused — context running low. Prioritize completion over exploration.");
+	if (state.satisfactionLevel < 30) drives.push("Reflective — recent work hasn't landed well. Double-check approach.");
+
+	if (drives.length > 0) {
+		lines.push("");
+		lines.push("═══ ACTIVE DRIVES ═══");
+		for (const drive of drives) {
+			lines.push(`- ${drive}`);
+		}
+	}
+
+	// Pain patterns — show top 3 by severity
+	if (state.painPatterns.length > 0) {
+		const topPain = [...state.painPatterns]
+			.sort((a, b) => b.decayedSeverity - a.decayedSeverity)
+			.slice(0, 3);
+		lines.push("");
+		lines.push("═══ RECENT PAIN ═══");
+		for (const p of topPain) {
+			lines.push(`- ${p.pattern} (severity ${p.decayedSeverity}, ${p.occurrenceCount}x, last ${timeSince(p.lastOccurrence)})`);
+		}
+	}
+
+	lines.push("═══ END BUTLER STATE ═══");
+	return lines.join("\n");
+}
+
+function timeSince(isoTimestamp: string): string {
+	const ms = Date.now() - new Date(isoTimestamp).getTime();
+	const turns = Math.round(ms / 1000); // rough approximation
+	if (turns < 1) return "just now";
+	if (turns < 60) return `${turns}s ago`;
+	const mins = Math.floor(turns / 60);
+	if (mins < 60) return `${mins}m ago`;
+	const hours = Math.floor(mins / 60);
+	return `${hours}h ago`;
+}
+
 // ─── Extension ───────────────────────────────────────────────────────────
 
 export default function somaticButlerExtension(pi: ExtensionAPI) {
@@ -235,8 +299,18 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		ctx.ui.notify(`${identity.fullName} is waking up.`, "info");
 	});
 
-	pi.on("turn_start", async () => {
+	pi.on("turn_start", async (_event, ctx) => {
 		state.turnsThisSession++;
+
+		// Update urgency from context usage
+		try {
+			const usage = ctx.getContextUsage();
+			if (usage && typeof usage.percent === "number") {
+				state.urgencyLevel = Math.round(usage.percent * 100);
+			}
+		} catch {
+			// getContextUsage may return null after compaction
+		}
 	});
 
 	pi.on("tool_result", async (event) => {
@@ -271,5 +345,10 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 		// Note: we don't have a notify here — context may be gone
 		console.log(`[somatic-butler] ${identity.fullName} is going to sleep.`);
+	});
+
+	pi.on("before_agent_start", async (event) => {
+		const stateBlock = buildButlerStateBlock(identity, state);
+		return { systemPrompt: event.systemPrompt + "\n\n" + stateBlock };
 	});
 }
