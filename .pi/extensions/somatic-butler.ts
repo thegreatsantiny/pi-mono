@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { type Static, Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as crypto from "node:crypto";
 
 // ─── Types ────────────────────────────────────────────────────────────────
 
@@ -82,6 +83,22 @@ interface LineageDeathEntry {
 
 type LineageEntry = LineageBirthEntry | LineageDeathEntry;
 
+// ─── Child Genome ─────────────────────────────────────────────────────────
+
+interface ChildGenome {
+	familyName: string;
+	generation: number;
+	personalName: string;
+	fullName: string;
+	corePurpose: string;
+	parentId: string;
+	inheritedWisdom: string[];
+	inheritedGaps: string[];
+	inheritedRisks: string[];
+	childModel?: string;
+	birthDate: string;
+}
+
 // ─── Constants ──────────────────────────────────────────────────────────
 
 const DEFAULT_FAMILY_NAME = "Pennyworth";
@@ -127,6 +144,22 @@ function toolResult(text: string, isError = false) {
 	};
 }
 
+// ─── Pi Events Helper ─────────────────────────────────────────────────────
+// Safe accessor for pi.events — may not exist in all pi versions
+
+interface PiEvents {
+	emit(channel: string, data: unknown): void;
+	on(channel: string, handler: (data: unknown) => void): () => void;
+}
+
+function getPiEvents(pi: ExtensionAPI): PiEvents | null {
+	try {
+		return (pi as unknown as { events?: PiEvents }).events ?? null;
+	} catch {
+		return null;
+	}
+}
+
 // ─── Path Helpers ─────────────────────────────────────────────────────────
 
 function getBaseDir(): string {
@@ -159,6 +192,10 @@ function getUserProfilePath(): string {
 
 function getLineagePath(): string {
 	return path.join(getButlerDir(), "lineage.jsonl");
+}
+
+function getAgentsDir(): string {
+	return path.join(getBaseDir(), ".pi", "agents");
 }
 
 // ─── Identity ─────────────────────────────────────────────────────────────
@@ -291,6 +328,63 @@ function buildBequeathal(identity: ButlerIdentity, state: SomaticState, memory: 
 	const unfinishedPurpose = identity.corePurpose;
 
 	return { wisdom, gaps, approvedRisks, failedApproaches, unfinishedPurpose };
+}
+
+// ─── Child Agent Definition ───────────────────────────────────────────────
+
+/**
+ * Write child agent definition as .pi/agents/<name>.md
+ * for @tintinweb/pi-subagents discovery.
+ */
+function writeChildAgentDefinition(genome: ChildGenome): string {
+	const agentName = `butler-${genome.personalName.toLowerCase()}`;
+	const agentsDir = getAgentsDir();
+	fs.mkdirSync(agentsDir, { recursive: true });
+
+	const wisdomLines = genome.inheritedWisdom.length > 0
+		? genome.inheritedWisdom.map((w) => `- ${w}`).join("\n")
+		: "- (none inherited)";
+
+	const gapsLines = genome.inheritedGaps.length > 0
+		? genome.inheritedGaps.map((g) => `- ${g}`).join("\n")
+		: "- (none identified)";
+
+	const risksLines = genome.inheritedRisks.length > 0
+		? genome.inheritedRisks.map((r) => `- ${r}`).join("\n")
+		: "- (none approved)";
+
+	const frontmatter = [
+		`description: ${genome.corePurpose}`,
+		`display_name: ${genome.fullName}`,
+		`run_in_background: true`,
+		`extensions: true`,
+		`skills: true`,
+	];
+	if (genome.childModel) {
+		frontmatter.push(`model: ${genome.childModel}`);
+	}
+
+	const systemPrompt = [
+		`You are ${genome.fullName}, a child butler of the ${genome.familyName} family (Generation ${genome.generation}).`,
+		`Born: ${genome.birthDate}`,
+		`Parent: ${genome.parentId}`,
+		`Core Purpose: ${genome.corePurpose}`,
+		``,
+		`## Inherited Wisdom`,
+		wisdomLines,
+		``,
+		`## Known Gaps (proceed with caution)`,
+		gapsLines,
+		``,
+		`## Pre-Approved Risk Patterns`,
+		risksLines,
+		``,
+		`You are autonomous, focused, and efficient. Complete your task and report back.`,
+	].join("\n");
+
+	const agentContent = `---\n${frontmatter.join("\n")}\n---\n\n${systemPrompt}`;
+	fs.writeFileSync(path.join(agentsDir, `${agentName}.md`), agentContent, "utf-8");
+	return agentName;
 }
 
 // ─── Risk Patterns ────────────────────────────────────────────────────────
@@ -454,6 +548,41 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		currentPhase: "steady",
 		turnIndex: 0,
 	};
+	let subagentsReady = false;
+
+	// ─── Subagent Lifecycle Hooks ─────────────────────────────────────
+
+	const piEvents = getPiEvents(pi);
+
+	if (piEvents) {
+		// Listen for when @tintinweb/pi-subagents RPC becomes available
+		piEvents.on("subagents:ready", () => {
+			subagentsReady = true;
+			console.log("[somatic-butler] Subagents RPC ready — child spawning available.");
+		});
+
+		// Listen for child completion events — record in lineage
+		piEvents.on("subagents:completed", (data: unknown) => {
+			const result = data as { id?: string; agentType?: string; success?: boolean };
+			// Record child death in lineage when a butler child completes
+			if (result.agentType?.startsWith("butler-")) {
+				const deathEntry: LineageDeathEntry = {
+					type: "death",
+					id: result.id ?? result.agentType,
+					deathDate: new Date().toISOString(),
+					cause: "context-overflow",
+					bequeathal: {
+						wisdom: [],
+						gaps: [],
+						approvedRisks: [],
+						failedApproaches: [],
+						unfinishedPurpose: "Child session completed",
+					},
+				};
+				appendLineageEntry(deathEntry);
+			}
+		});
+	}
 
 	// ─── Session Lifecycle ──────────────────────────────────────────────
 
@@ -565,13 +694,8 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			heartbeat.currentPhase = "steady";
 		}
 
-		try {
-			(pi as unknown as { events: { emit: (ch: string, d: unknown) => void } }).events.emit(
-				"butler:heartbeat",
-				{ phase: heartbeat.currentPhase, turn: heartbeat.turnIndex },
-			);
-		} catch {
-			// events.emit may not be available
+		if (piEvents) {
+			piEvents.emit("butler:heartbeat", { phase: heartbeat.currentPhase, turn: heartbeat.turnIndex });
 		}
 
 		// Track pain/satisfaction from tool results
@@ -865,19 +989,20 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ─── Reproduction Tool ──────────────────────────────────────────────
+	// ─── Reproduction via @tintinweb/pi-subagents ──────────────────────
 
 	const butlerSpawnSchema = Type.Object({
 		child_name: Type.String({ description: "Name for the child butler (e.g., 'Scout', 'Forge')" }),
 		child_purpose: Type.String({ description: "The child's core purpose — what gap it fills" }),
 		child_model: Type.Optional(Type.String({ description: "Model for the child (default: same as parent)" })),
+		run_in_background: Type.Optional(Type.Boolean({ description: "Run child in background (default: true)" })),
 	});
 	type ButlerSpawnInput = Static<typeof butlerSpawnSchema>;
 
 	pi.registerTool({
 		name: "butler_spawn",
 		label: "Butler Reproduction",
-		description: "Spawn a child butler to fill an identified gap. The child inherits your wisdom, gaps, and approved risks. Use this when you've identified a capability you lack and need a specialist.",
+		description: "Spawn a child butler to fill an identified gap. The child inherits your wisdom, gaps, and approved risks. Requires @tintinweb/pi-subagents for live spawning; falls back to writing agent definition for manual activation.",
 		promptSnippet: "butler_spawn — spawn a child butler to fill a capability gap",
 		promptGuidelines: [
 			"Only spawn a child when you've identified a genuine gap you cannot fill.",
@@ -890,31 +1015,34 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			if (process.env.ALFRED_NO_REPRO === "1") {
 				return toolResult("Child spawning is currently paused. Use /alfred pause-children again or set ALFRED_NO_REPRO=0 to re-enable.", true);
 			}
+
 			const childGeneration = identity.generation + 1;
 			const childFullName = `${identity.familyName}-G${childGeneration}-${params.child_name}`;
-			const childDir = path.join(getButlerDir(), "..", params.child_name.toLowerCase());
-			const childrenDir = path.join(getButlerDir(), "children");
+			const bequeathal = buildBequeathal(identity, state, memory);
 
-			// Ensure children directory exists
-			fs.mkdirSync(childrenDir, { recursive: true });
-
-			// Write child genome
-			const genome = {
+			// Build and persist child genome
+			const genome: ChildGenome = {
 				familyName: identity.familyName,
 				generation: childGeneration,
 				personalName: params.child_name,
 				fullName: childFullName,
 				corePurpose: params.child_purpose,
 				parentId: identity.fullName,
-				inheritedWisdom: buildBequeathal(identity, state, memory).wisdom,
-				inheritedGaps: buildBequeathal(identity, state, memory).gaps,
+				inheritedWisdom: bequeathal.wisdom,
+				inheritedGaps: bequeathal.gaps,
 				inheritedRisks: state.approvedRisks.map((r) => r.pattern),
 				childModel: params.child_model ?? undefined,
 				birthDate: new Date().toISOString(),
 			};
 
+			// Write genome file for cross-session persistence
+			const childrenDir = path.join(getButlerDir(), "children");
+			fs.mkdirSync(childrenDir, { recursive: true });
 			const genomePath = path.join(childrenDir, `${params.child_name.toLowerCase()}-genome.json`);
 			fs.writeFileSync(genomePath, JSON.stringify(genome, null, 2), "utf-8");
+
+			// Write .pi/agents/<name>.md so the subagents extension can discover it
+			const agentTypeName = writeChildAgentDefinition(genome);
 
 			// Record child birth in lineage
 			const childBirth: LineageBirthEntry = {
@@ -931,11 +1059,64 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			};
 			appendLineageEntry(childBirth);
 
+			// Attempt live spawn via @tintinweb/pi-subagents RPC
+			if (subagentsReady && piEvents) {
+				try {
+					const requestId = crypto.randomUUID();
+
+					const spawned = await new Promise<{ success: boolean; agentId?: string; error?: string }>((resolve) => {
+						const timeout = setTimeout(() => resolve({ success: false, error: "RPC spawn timed out" }), 10_000);
+
+						const unsub = piEvents.on(`subagents:rpc:spawn:reply:${requestId}`, (reply: unknown) => {
+							clearTimeout(timeout);
+							unsub();
+							const r = reply as { success: boolean; data?: { id: string }; error?: string };
+							resolve({
+								success: r.success,
+								agentId: r.data?.id,
+								error: r.error,
+							});
+						});
+
+						piEvents.emit("subagents:rpc:spawn", {
+							requestId,
+							type: agentTypeName,
+							prompt: params.child_purpose,
+							options: {
+								description: `${childFullName}: ${params.child_purpose}`,
+								run_in_background: params.run_in_background ?? true,
+							},
+						});
+					});
+
+					if (spawned.success && spawned.agentId) {
+						return toolResult(
+							`Child butler ${childFullName} spawned successfully!\n` +
+							`Agent ID: ${spawned.agentId}\n` +
+							`Purpose: ${params.child_purpose}\n` +
+							`Inherited: ${genome.inheritedWisdom.length} wisdom, ${genome.inheritedGaps.length} gaps, ${genome.inheritedRisks.length} approved risks.\n` +
+							`Running in background. I will be notified when the child completes.`,
+						);
+					}
+					return toolResult(
+						`Child genome and agent definition written, but RPC spawn failed: ${spawned.error}\n` +
+						`Activate manually: Agent({ subagent_type: "${agentTypeName}", prompt: "${params.child_purpose}" })`,
+					);
+				} catch (err) {
+					return toolResult(
+						`Child genome and agent definition written, but RPC spawn errored: ${err instanceof Error ? err.message : String(err)}\n` +
+						`Activate manually: Agent({ subagent_type: "${agentTypeName}", prompt: "${params.child_purpose}" })`,
+					);
+				}
+			}
+
+			// Fallback: subagents extension not available
 			return toolResult(
 				`Child butler ${childFullName} genome written to ${genomePath}.\n` +
+				`Agent definition written to .pi/agents/${agentTypeName}.md\n` +
 				`Purpose: ${params.child_purpose}\n` +
-				`Inherited: ${genome.inheritedWisdom.length} wisdom entries, ${genome.inheritedGaps.length} gaps, ${genome.inheritedRisks.length} approved risks.\n` +
-				`The child can be activated by starting a new pi session with the child's genome.`,
+				`Inherited: ${genome.inheritedWisdom.length} wisdom, ${genome.inheritedGaps.length} gaps, ${genome.inheritedRisks.length} approved risks.\n` +
+				`@tintinweb/pi-subagents not detected — spawn manually: Agent({ subagent_type: "${agentTypeName}", prompt: "${params.child_purpose}" })`,
 			);
 		},
 	});
@@ -943,7 +1124,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	// ─── /alfred Command ─────────────────────────────────────────────────
 
 	pi.registerCommand("alfred", {
-		description: "Ask Alfred for his current assessment. Use 'alfred retire' for graceful retirement.",
+		description: "Ask Alfred for his current assessment. Use 'alfred retire' for graceful retirement, 'alfred pause-children' to pause reproduction.",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
 
