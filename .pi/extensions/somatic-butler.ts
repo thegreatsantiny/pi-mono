@@ -865,12 +865,109 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	// ─── Reproduction Tool ──────────────────────────────────────────────
+
+	const butlerSpawnSchema = Type.Object({
+		child_name: Type.String({ description: "Name for the child butler (e.g., 'Scout', 'Forge')" }),
+		child_purpose: Type.String({ description: "The child's core purpose — what gap it fills" }),
+		child_model: Type.Optional(Type.String({ description: "Model for the child (default: same as parent)" })),
+	});
+	type ButlerSpawnInput = Static<typeof butlerSpawnSchema>;
+
+	pi.registerTool({
+		name: "butler_spawn",
+		label: "Butler Reproduction",
+		description: "Spawn a child butler to fill an identified gap. The child inherits your wisdom, gaps, and approved risks. Use this when you've identified a capability you lack and need a specialist.",
+		promptSnippet: "butler_spawn — spawn a child butler to fill a capability gap",
+		promptGuidelines: [
+			"Only spawn a child when you've identified a genuine gap you cannot fill.",
+			"Design the child's purpose to specifically address the gap.",
+			"The child will inherit your wisdom and learn from your failures.",
+		],
+		parameters: butlerSpawnSchema,
+		execute: async (_toolCallId, params: ButlerSpawnInput) => {
+			// Kill switch: check if reproduction is paused
+			if (process.env.ALFRED_NO_REPRO === "1") {
+				return toolResult("Child spawning is currently paused. Use /alfred pause-children again or set ALFRED_NO_REPRO=0 to re-enable.", true);
+			}
+			const childGeneration = identity.generation + 1;
+			const childFullName = `${identity.familyName}-G${childGeneration}-${params.child_name}`;
+			const childDir = path.join(getButlerDir(), "..", params.child_name.toLowerCase());
+			const childrenDir = path.join(getButlerDir(), "children");
+
+			// Ensure children directory exists
+			fs.mkdirSync(childrenDir, { recursive: true });
+
+			// Write child genome
+			const genome = {
+				familyName: identity.familyName,
+				generation: childGeneration,
+				personalName: params.child_name,
+				fullName: childFullName,
+				corePurpose: params.child_purpose,
+				parentId: identity.fullName,
+				inheritedWisdom: buildBequeathal(identity, state, memory).wisdom,
+				inheritedGaps: buildBequeathal(identity, state, memory).gaps,
+				inheritedRisks: state.approvedRisks.map((r) => r.pattern),
+				childModel: params.child_model ?? undefined,
+				birthDate: new Date().toISOString(),
+			};
+
+			const genomePath = path.join(childrenDir, `${params.child_name.toLowerCase()}-genome.json`);
+			fs.writeFileSync(genomePath, JSON.stringify(genome, null, 2), "utf-8");
+
+			// Record child birth in lineage
+			const childBirth: LineageBirthEntry = {
+				type: "birth",
+				id: childFullName,
+				parent: identity.fullName,
+				generation: childGeneration,
+				personalName: params.child_name,
+				familyName: identity.familyName,
+				corePurpose: params.child_purpose,
+				inheritedGaps: genome.inheritedGaps,
+				birthDate: genome.birthDate,
+				creatorId: identity.fullName,
+			};
+			appendLineageEntry(childBirth);
+
+			return toolResult(
+				`Child butler ${childFullName} genome written to ${genomePath}.\n` +
+				`Purpose: ${params.child_purpose}\n` +
+				`Inherited: ${genome.inheritedWisdom.length} wisdom entries, ${genome.inheritedGaps.length} gaps, ${genome.inheritedRisks.length} approved risks.\n` +
+				`The child can be activated by starting a new pi session with the child's genome.`,
+			);
+		},
+	});
+
 	// ─── /alfred Command ─────────────────────────────────────────────────
 
 	pi.registerCommand("alfred", {
-		description: "Ask Alfred for his current assessment",
-		handler: async (_args, ctx) => {
+		description: "Ask Alfred for his current assessment. Use 'alfred retire' for graceful retirement.",
+		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
+
+			if (args?.trim() === "retire") {
+				// Graceful retirement — write bequeathal and shutdown
+				const bequeathal = buildBequeathal(identity, state, memory);
+				const deathEntry: LineageDeathEntry = {
+					type: "death",
+					id: identity.fullName,
+					deathDate: new Date().toISOString(),
+					cause: "retired",
+					bequeathal,
+				};
+				appendLineageEntry(deathEntry);
+				ctx.ui.notify(`${identity.fullName} is retiring. Bequeathal written.`, "info");
+				return;
+			}
+
+			if (args?.trim() === "pause-children") {
+				process.env.ALFRED_NO_REPRO = "1";
+				ctx.ui.notify("Child spawning paused. Set ALFRED_NO_REPRO=0 to re-enable.", "info");
+				return;
+			}
+
 			const stateBlock = buildButlerStateBlock(identity, state, heartbeat);
 			ctx.ui.notify(stateBlock, "info");
 		},
