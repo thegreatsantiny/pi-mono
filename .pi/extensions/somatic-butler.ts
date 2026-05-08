@@ -469,11 +469,13 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		// Build memory injection
 		let memoryBlock = "";
 		if (memory.trim()) {
-			const memUsage = `${memory.length}/${MEMORY_CAPACITY}`;
+			const memOverCapacity = memory.length > MEMORY_CAPACITY;
+			const memUsage = `${memory.length}/${MEMORY_CAPACITY}${memOverCapacity ? " OVER CAPACITY — consolidate now" : ""}`;
 			memoryBlock += `\n\n═══ BUTLER MEMORY (${memUsage} chars) ═══\n${memory.trim()}\n═══ END BUTLER MEMORY ═══`;
 		}
 		if (userProfile.trim()) {
-			const profileUsage = `${userProfile.length}/${USER_PROFILE_CAPACITY}`;
+			const profileOverCapacity = userProfile.length > USER_PROFILE_CAPACITY;
+			const profileUsage = `${userProfile.length}/${USER_PROFILE_CAPACITY}${profileOverCapacity ? " OVER CAPACITY — consolidate now" : ""}`;
 			memoryBlock += `\n\n═══ USER PROFILE (${profileUsage} chars) ═══\n${userProfile.trim()}\n═══ END USER PROFILE ═══`;
 		}
 
