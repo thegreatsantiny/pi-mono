@@ -481,7 +481,6 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		} catch {
 			// events.emit may not be available
 		}
-		const toolName = (event as { toolName?: string }).toolName ?? "unknown";
 
 		if (event.isError) {
 			state.painLevel = Math.min(100, state.painLevel + 20);
