@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { type Static, Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -480,5 +481,152 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		}
 
 		return { systemPrompt: event.systemPrompt + "\n\n" + stateBlock + memoryBlock };
+	});
+
+	// ─── Custom Tools ───────────────────────────────────────────────────────
+
+	const butlerMemorySchema = Type.Object({
+		action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove"), Type.Literal("consolidate")], {
+			description: "Action to perform on memory",
+		}),
+		target: Type.Union([Type.Literal("memory"), Type.Literal("user")], {
+			description: "Which file to modify: memory (your notes) or user (user profile)",
+		}),
+		section: Type.Optional(Type.String({ description: "Section heading (e.g., 'Lessons Learned', 'Preferences')" })),
+		old_text: Type.Optional(Type.String({ description: "For replace/remove: substring to match" })),
+		content: Type.Optional(Type.String({ description: "For add/replace: the new entry text" })),
+	});
+	type ButlerMemoryInput = Static<typeof butlerMemorySchema>;
+
+	pi.registerTool({
+		name: "butler_memory",
+		label: "Butler Memory",
+		description: "Manage your persistent memory (memory.md) or user profile (user-profile.md). Use 'add' to add an entry to a section, 'replace' to update existing text, 'remove' to delete an entry, and 'consolidate' to compress memory when over capacity.",
+		promptSnippet: "butler_memory — manage persistent memory and user profile",
+		promptGuidelines: [
+			"Use butler_memory to record important discoveries, user preferences, and lessons learned.",
+			"Consolidate memory when it approaches capacity to keep it focused and relevant.",
+		],
+		parameters: butlerMemorySchema,
+		execute: async (_toolCallId, params: ButlerMemoryInput, _signal, _onUpdate, _ctx) => {
+			const targetContent = params.target === "memory" ? memory : userProfile;
+			const capacity = params.target === "memory" ? MEMORY_CAPACITY : USER_PROFILE_CAPACITY;
+			const persistFn = params.target === "memory" ? persistMemory : persistUserProfile;
+			const targetName = params.target === "memory" ? "memory.md" : "user-profile.md";
+
+			if (params.action === "add") {
+				if (!params.section || !params.content) {
+					return { output: `Error: 'add' requires both 'section' and 'content' parameters.`, isError: true };
+				}
+				if (targetContent.length + params.content.length > capacity * 1.5) {
+					return { output: `Error: ${targetName} is too full (${targetContent.length}/${capacity} chars). Consolidate first.`, isError: true };
+				}
+
+				// Find or create the section
+				const sectionHeader = `## ${params.section}`;
+				const lines = targetContent.split("\n");
+				const sectionIdx = lines.findIndex((l) => l.trim() === sectionHeader);
+
+				if (sectionIdx >= 0) {
+					// Insert after the section header
+					lines.splice(sectionIdx + 1, 0, `- ${params.content}`);
+				} else {
+					// Append new section at end
+					lines.push(`\n${sectionHeader}\n- ${params.content}`);
+				}
+
+				const newContent = lines.join("\n");
+				if (params.target === "memory") { memory = newContent; } else { userProfile = newContent; }
+				persistFn(newContent);
+				return { output: `Added to ${params.section} in ${targetName}. Size: ${newContent.length}/${capacity} chars.` };
+			}
+
+			if (params.action === "replace") {
+				if (!params.old_text || !params.content) {
+					return { output: `Error: 'replace' requires both 'old_text' and 'content' parameters.`, isError: true };
+				}
+				if (!targetContent.includes(params.old_text)) {
+					return { output: `Error: Could not find '${params.old_text}' in ${targetName}.`, isError: true };
+				}
+				const newContent = targetContent.replace(params.old_text, params.content);
+				if (params.target === "memory") { memory = newContent; } else { userProfile = newContent; }
+				persistFn(newContent);
+				return { output: `Replaced in ${targetName}. Size: ${newContent.length}/${capacity} chars.` };
+			}
+
+			if (params.action === "remove") {
+				if (!params.old_text) {
+					return { output: `Error: 'remove' requires 'old_text' parameter.`, isError: true };
+				}
+				if (!targetContent.includes(params.old_text)) {
+					return { output: `Error: Could not find '${params.old_text}' in ${targetName}.`, isError: true };
+				}
+				const newContent = targetContent.replace(params.old_text, "").replace(/\n{3,}/g, "\n\n");
+				if (params.target === "memory") { memory = newContent; } else { userProfile = newContent; }
+				persistFn(newContent);
+				return { output: `Removed from ${targetName}. Size: ${newContent.length}/${capacity} chars.` };
+			}
+
+			if (params.action === "consolidate") {
+				// The LLM should do the actual consolidation by calling replace/remove.
+				// This action just reports current state.
+				return { output: `${targetName} is ${targetContent.length}/${capacity} chars. Use 'replace' to merge related entries or 'remove' to delete stale ones.` };
+			}
+
+			return { output: `Unknown action: ${params.action}` };
+		},
+	});
+
+	const butlerAssessSchema = Type.Object({
+		action: Type.Union([Type.Literal("state"), Type.Literal("gaps"), Type.Literal("lineage"), Type.Literal("recommend_rest")], {
+			description: "What to assess: current state, identified gaps, lineage info, or rest recommendation",
+		}),
+	});
+	type ButlerAssessInput = Static<typeof butlerAssessSchema>;
+
+	pi.registerTool({
+		name: "butler_assess",
+		label: "Butler Self-Assessment",
+		description: "Assess your own state, gaps, lineage, or get a rest recommendation. Use this to understand how you're feeling and what you can and cannot do.",
+		promptSnippet: "butler_assess — self-assess state, gaps, and rest needs",
+		promptGuidelines: [
+			"Use butler_assess when asked about your state or capabilities.",
+			"Recommend rest (compaction) when fatigue is high or context is running low.",
+		],
+		parameters: butlerAssessSchema,
+		execute: async (_toolCallId, params: ButlerAssessInput, _signal, _onUpdate, _ctx) => {
+			if (params.action === "state") {
+				return { output: `${identity.fullName} — Somatic State:\n${buildButlerStateBlock(identity, state)}` };
+			}
+
+			if (params.action === "gaps") {
+				const gaps = state.painPatterns
+					.filter((p) => p.occurrenceCount >= 3)
+					.map((p) => `- ${p.pattern} (${p.occurrenceCount} failures, severity ${p.decayedSeverity})`);
+				if (gaps.length === 0) {
+					return { output: "No significant gaps identified yet." };
+				}
+				return { output: `Identified Gaps:\n${gaps.join("\n")}` };
+			}
+
+			if (params.action === "lineage") {
+				return { output: `${identity.fullName} | Gen: ${identity.generation} | Born: ${identity.birthDate} | Purpose: ${identity.corePurpose}` };
+			}
+
+			if (params.action === "recommend_rest") {
+				if (state.fatigueLevel > 85) {
+					return { output: `I am deeply fatigued (fatigue: ${state.fatigueLevel}/100). I recommend we compact (nap) before continuing. I may make mistakes in this state.` };
+				}
+				if (state.fatigueLevel > 70) {
+					return { output: `I am quite fatigued (fatigue: ${state.fatigueLevel}/100). Compaction would help me focus better.` };
+				}
+				if (state.fatigueLevel > 50) {
+					return { output: `I'm moderately fatigued (fatigue: ${state.fatigueLevel}/100). I can continue, but will suggest a nap if it rises further.` };
+				}
+				return { output: `I'm feeling alert (fatigue: ${state.fatigueLevel}/100). No rest needed right now.` };
+			}
+
+			return { output: `Unknown assessment action: ${params.action}` };
+		},
 	});
 }
