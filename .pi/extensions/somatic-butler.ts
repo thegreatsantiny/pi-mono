@@ -64,6 +64,9 @@ const SATISFACTION_DECAY_PER_TURN = 0.95;
 const FATIGUE_DECAY_BETWEEN_SESSIONS = 30;
 const PAIN_DECAY_BETWEEN_SESSIONS = 0.5;
 
+// In-session tracking
+const STATE_ENTRY_TYPE = "butler-state";
+
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 function getBaseDir(): string {
@@ -180,6 +183,12 @@ function persistState(state: SomaticState): void {
 	fs.writeFileSync(getStatePath(), JSON.stringify(state, null, 2), "utf-8");
 }
 
+function applyPerTurnDecay(state: SomaticState): void {
+	state.painLevel = Math.round(state.painLevel * PAIN_DECAY_PER_TURN);
+	state.satisfactionLevel = Math.round(state.satisfactionLevel * SATISFACTION_DECAY_PER_TURN);
+	state.fatigueLevel = Math.min(100, state.fatigueLevel + 2); // Fatigue grows with each turn
+}
+
 // ─── Extension ───────────────────────────────────────────────────────────
 
 export default function somaticButlerExtension(pi: ExtensionAPI) {
@@ -190,7 +199,70 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		identity = loadOrCreateIdentity();
 		state = loadOrCreateState();
 
+		// Replay in-session state entries to reconstruct branch-correct state
+		try {
+			const entries = ctx.sessionManager.getEntries();
+			const stateEntries = entries
+				.filter((e: unknown) => {
+					const entryType = (e as { type?: string }).type;
+					// Look for our custom entry type
+					if (entryType === STATE_ENTRY_TYPE) return true;
+					// Also check for butler-state as entry constants
+					return false;
+				})
+				.map((e: unknown) => {
+					const data = (e as { data?: unknown }).data as SomaticState | undefined;
+					return data;
+				})
+				.filter(Boolean);
+
+			// Apply latest state snapshot if any entries exist
+			if (stateEntries.length > 0) {
+				const latest = stateEntries[stateEntries.length - 1] as SomaticState;
+				state.painLevel = latest.painLevel ?? state.painLevel;
+				state.satisfactionLevel = latest.satisfactionLevel ?? state.satisfactionLevel;
+				state.fatigueLevel = latest.fatigueLevel ?? state.fatigueLevel;
+				state.urgencyLevel = latest.urgencyLevel ?? state.urgencyLevel;
+				state.curiosityLevel = latest.curiosityLevel ?? state.curiosityLevel;
+				state.approvedRisks = latest.approvedRisks ?? state.approvedRisks;
+				state.painPatterns = latest.painPatterns ?? state.painPatterns;
+				state.satisfactionPatterns = latest.satisfactionPatterns ?? state.satisfactionPatterns;
+			}
+		} catch {
+			// If getEntries is not available, we'll just use the filesystem state
+		}
+
 		ctx.ui.notify(`${identity.fullName} is waking up.`, "info");
+	});
+
+	pi.on("turn_start", async () => {
+		state.turnsThisSession++;
+	});
+
+	pi.on("tool_result", async (event) => {
+		if (event.isError) {
+			state.painLevel = Math.min(100, state.painLevel + 20);
+			state.errorsThisSession++;
+			// TODO: record pain pattern
+		} else {
+			state.satisfactionLevel = Math.min(100, state.satisfactionLevel + 10);
+			state.successesThisSession++;
+			// TODO: record satisfaction pattern
+		}
+	});
+
+	pi.on("turn_end", async () => {
+		applyPerTurnDecay(state);
+
+		// Persist to in-session appendEntry for branch-correct tracking
+		try {
+			(pi as unknown as { appendEntry: (type: string, data: unknown) => void }).appendEntry(
+				STATE_ENTRY_TYPE,
+				{ ...state },
+			);
+		} catch {
+			// appendEntry may not be available in all pi versions
+		}
 	});
 
 	pi.on("session_shutdown", async () => {
