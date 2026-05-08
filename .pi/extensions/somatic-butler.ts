@@ -68,33 +68,39 @@ const PAIN_DECAY_BETWEEN_SESSIONS = 0.5;
 // In-session tracking
 const STATE_ENTRY_TYPE = "butler-state";
 
-// ─── Heartbeat ──────────────────────────────────────────────────────────
+// Memory capacity
+const MEMORY_CAPACITY = 2000;
+const USER_PROFILE_CAPACITY = 1000;
 
-const HEARTBEAT_WINDOW = 5; // Rolling window of last N tool calls for breath detection
+// Heartbeat
+const HEARTBEAT_WINDOW = 5;
 
 type BreathPhase = "inhaling" | "exhaling" | "steady";
 
 interface HeartbeatState {
-	recentToolNames: string[]; // Rolling window of tool names
+	recentToolNames: string[];
 	currentPhase: BreathPhase;
 	turnIndex: number;
 }
 
-// Tools that indicate information gathering (inhaling)
 const INHALE_TOOLS = new Set(["read", "ls", "find", "grep", "glob"]);
-// Tools that indicate output production (exhaling)
 const EXHALE_TOOLS = new Set(["write", "edit", "bash"]);
 
-// ─── Helpers ────────────────────────────────────────────────────────────
+// ─── Tool Result Helper ──────────────────────────────────────────────────
 
-function getBaseDir(): string {
-	// When pi runs a project-local extension, process.cwd() is the project root
-	// (where .pi/ lives). Fallback to __dirname for safety, though __dirname
-	// would point inside dist/ in a compiled context.
-	return process.cwd();
+function toolResult(text: string, isError = false) {
+	return {
+		content: [{ type: "text" as const, text }],
+		details: undefined as unknown,
+		isError,
+	};
 }
 
 // ─── Path Helpers ─────────────────────────────────────────────────────────
+
+function getBaseDir(): string {
+	return process.cwd();
+}
 
 function getButlerDir(): string {
 	return path.join(getBaseDir(), ".pi", "butlers", DEFAULT_FAMILY_NAME.toLowerCase());
@@ -125,11 +131,9 @@ function getUserProfilePath(): string {
 function loadOrCreateIdentity(): ButlerIdentity {
 	const identityPath = getIdentityPath();
 	if (fs.existsSync(identityPath)) {
-		const raw = fs.readFileSync(identityPath, "utf-8");
-		return JSON.parse(raw) as ButlerIdentity;
+		return JSON.parse(fs.readFileSync(identityPath, "utf-8")) as ButlerIdentity;
 	}
 
-	// First run — read purpose from file or use default
 	let corePurpose = DEFAULT_PURPOSE;
 	const purposePath = getPurposePath();
 	if (fs.existsSync(purposePath)) {
@@ -148,7 +152,6 @@ function loadOrCreateIdentity(): ButlerIdentity {
 
 	fs.mkdirSync(getButlerDir(), { recursive: true });
 	fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2), "utf-8");
-
 	return identity;
 }
 
@@ -187,25 +190,12 @@ const DEFAULT_USER_PROFILE = `# User Profile — Shaun
 - (not yet discovered)
 `;
 
-const MEMORY_CAPACITY = 2000;
-const USER_PROFILE_CAPACITY = 1000;
-
-function loadOrCreateMemory(): string {
-	const memPath = getMemoryPath();
-	if (fs.existsSync(memPath)) {
-		return fs.readFileSync(memPath, "utf-8");
+function loadOrCreateFile(filePath: string, defaultContent: string): string {
+	if (fs.existsSync(filePath)) {
+		return fs.readFileSync(filePath, "utf-8");
 	}
-	fs.writeFileSync(memPath, DEFAULT_MEMORY, "utf-8");
-	return DEFAULT_MEMORY;
-}
-
-function loadOrCreateUserProfile(): string {
-	const profilePath = getUserProfilePath();
-	if (fs.existsSync(profilePath)) {
-		return fs.readFileSync(profilePath, "utf-8");
-	}
-	fs.writeFileSync(profilePath, DEFAULT_USER_PROFILE, "utf-8");
-	return DEFAULT_USER_PROFILE;
+	fs.writeFileSync(filePath, defaultContent, "utf-8");
+	return defaultContent;
 }
 
 function persistMemory(content: string): void {
@@ -227,7 +217,6 @@ const RISK_PATTERNS: { pattern: string; regex: RegExp; description: string }[] =
 ];
 
 function detectRisk(input: Record<string, unknown>): { pattern: string; description: string } | null {
-	// Check bash command for risk patterns
 	const command = typeof input.command === "string" ? input.command : "";
 	const content = typeof input.content === "string" ? input.content : "";
 	const combined = `${command} ${content}`;
@@ -265,15 +254,11 @@ function loadOrCreateState(): SomaticState {
 		return createDefaultState();
 	}
 
-	const raw = fs.readFileSync(statePath, "utf-8");
-	const state = JSON.parse(raw) as SomaticState;
+	const state = JSON.parse(fs.readFileSync(statePath, "utf-8")) as SomaticState;
 
 	// Apply between-session decay
-	const lastModified = fs.statSync(statePath).mtime;
-	const hoursSince = (Date.now() - lastModified.getTime()) / (1000 * 60 * 60);
-
+	const hoursSince = (Date.now() - fs.statSync(statePath).mtime.getTime()) / (1000 * 60 * 60);
 	if (hoursSince >= 24) {
-		// Deep rest — full fatigue and pain recovery
 		state.fatigueLevel = 0;
 		state.painLevel = Math.round(state.painLevel * PAIN_DECAY_BETWEEN_SESSIONS * 0.5);
 	} else {
@@ -285,7 +270,6 @@ function loadOrCreateState(): SomaticState {
 	state.turnsThisSession = 0;
 	state.errorsThisSession = 0;
 	state.successesThisSession = 0;
-
 	return state;
 }
 
@@ -296,14 +280,12 @@ function persistState(state: SomaticState): void {
 function applyPerTurnDecay(state: SomaticState): void {
 	state.painLevel = Math.round(state.painLevel * PAIN_DECAY_PER_TURN);
 	state.satisfactionLevel = Math.round(state.satisfactionLevel * SATISFACTION_DECAY_PER_TURN);
-	state.fatigueLevel = Math.min(100, state.fatigueLevel + 2); // Fatigue grows with each turn
+	state.fatigueLevel = Math.min(100, state.fatigueLevel + 2);
 
 	// Decay individual pain patterns
 	for (const pattern of state.painPatterns) {
 		pattern.decayedSeverity = Math.round(pattern.decayedSeverity * PAIN_DECAY_PER_TURN);
 	}
-
-	// Remove patterns that have fully decayed
 	state.painPatterns = state.painPatterns.filter((p) => p.decayedSeverity > 0);
 }
 
@@ -324,13 +306,12 @@ function buildButlerStateBlock(identity: ButlerIdentity, state: SomaticState, he
 		`Purpose: ${identity.corePurpose}`,
 		`Breath: ${heartbeat.currentPhase}${heartbeat.currentPhase === "inhaling" ? " — taking in information, prioritize reading and understanding" : heartbeat.currentPhase === "exhaling" ? " — producing output, focus on completing and delivering" : ""}`,
 		"",
-		renderBar("Pain       ", state.painLevel),
-		renderBar("Fatigue    ", state.fatigueLevel),
-		renderBar("Urgency    ", state.urgencyLevel),
+		renderBar("Pain ", state.painLevel),
+		renderBar("Fatigue ", state.fatigueLevel),
+		renderBar("Urgency ", state.urgencyLevel),
 		renderBar("Satisfaction", state.satisfactionLevel),
 	];
 
-	// Active drives — only show when relevant
 	const drives: string[] = [];
 	if (state.painLevel > 40) drives.push("Cautious — recent difficulties. Verify before acting.");
 	if (state.fatigueLevel > 50) drives.push("Fatigued — consider compaction (a nap) if context pressure rises.");
@@ -338,20 +319,17 @@ function buildButlerStateBlock(identity: ButlerIdentity, state: SomaticState, he
 	if (state.satisfactionLevel < 30) drives.push("Reflective — recent work hasn't landed well. Double-check approach.");
 
 	if (drives.length > 0) {
-		lines.push("");
-		lines.push("═══ ACTIVE DRIVES ═══");
+		lines.push("", "═══ ACTIVE DRIVES ═══");
 		for (const drive of drives) {
 			lines.push(`- ${drive}`);
 		}
 	}
 
-	// Pain patterns — show top 3 by severity
 	if (state.painPatterns.length > 0) {
 		const topPain = [...state.painPatterns]
 			.sort((a, b) => b.decayedSeverity - a.decayedSeverity)
 			.slice(0, 3);
-		lines.push("");
-		lines.push("═══ RECENT PAIN ═══");
+		lines.push("", "═══ RECENT PAIN ═══");
 		for (const p of topPain) {
 			lines.push(`- ${p.pattern} (severity ${p.decayedSeverity}, ${p.occurrenceCount}x, last ${timeSince(p.lastOccurrence)})`);
 		}
@@ -363,14 +341,19 @@ function buildButlerStateBlock(identity: ButlerIdentity, state: SomaticState, he
 
 function timeSince(isoTimestamp: string): string {
 	const ms = Date.now() - new Date(isoTimestamp).getTime();
-	const turns = Math.round(ms / 1000); // rough approximation
-	if (turns < 1) return "just now";
-	if (turns < 60) return `${turns}s ago`;
-	const mins = Math.floor(turns / 60);
+	const secs = Math.round(ms / 1000);
+	if (secs < 1) return "just now";
+	if (secs < 60) return `${secs}s ago`;
+	const mins = Math.floor(secs / 60);
 	if (mins < 60) return `${mins}m ago`;
 	const hours = Math.floor(mins / 60);
 	return `${hours}h ago`;
 }
+
+// ─── Human Feedback Patterns ─────────────────────────────────────────────
+
+const POSITIVE_FEEDBACK = /\b(good job|great|perfect|well done|nice|excellent|thanks|thank you|spot on|nailed it|that's right|correct|exactly)\b/i;
+const NEGATIVE_FEEDBACK = /\b(wrong|not what i meant|that's incorrect|nope|bad|terrible|stop|don't do that|not helpful|useless|mistake|error|fix that|try again|redo)\b/i;
 
 // ─── Extension ───────────────────────────────────────────────────────────
 
@@ -385,30 +368,22 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		turnIndex: 0,
 	};
 
+	// ─── Session Lifecycle ──────────────────────────────────────────────
+
 	pi.on("session_start", async (_event, ctx) => {
 		identity = loadOrCreateIdentity();
 		state = loadOrCreateState();
-		memory = loadOrCreateMemory();
-		userProfile = loadOrCreateUserProfile();
+		memory = loadOrCreateFile(getMemoryPath(), DEFAULT_MEMORY);
+		userProfile = loadOrCreateFile(getUserProfilePath(), DEFAULT_USER_PROFILE);
 
-		// Replay in-session state entries to reconstruct branch-correct state
+		// Replay in-session state entries for branch-correct state
 		try {
 			const entries = ctx.sessionManager.getEntries();
 			const stateEntries = entries
-				.filter((e: unknown) => {
-					const entryType = (e as { type?: string }).type;
-					// Look for our custom entry type
-					if (entryType === STATE_ENTRY_TYPE) return true;
-					// Also check for butler-state as entry constants
-					return false;
-				})
-				.map((e: unknown) => {
-					const data = (e as { data?: unknown }).data as SomaticState | undefined;
-					return data;
-				})
+				.filter((e: unknown) => (e as { type?: string }).type === STATE_ENTRY_TYPE)
+				.map((e: unknown) => (e as { data?: unknown }).data as SomaticState | undefined)
 				.filter(Boolean);
 
-			// Apply latest state snapshot if any entries exist
 			if (stateEntries.length > 0) {
 				const latest = stateEntries[stateEntries.length - 1] as SomaticState;
 				state.painLevel = latest.painLevel ?? state.painLevel;
@@ -421,27 +396,32 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				state.satisfactionPatterns = latest.satisfactionPatterns ?? state.satisfactionPatterns;
 			}
 		} catch {
-			// If getEntries is not available, we'll just use the filesystem state
+			// getEntries may not be available — use filesystem state only
 		}
 
 		ctx.ui.notify(`${identity.fullName} is waking up.`, "info");
 
 		// Register TUI status widget
 		if (ctx.hasUI) {
-			const updateWidget = () => {
-				ctx.ui.setWidget(
-					"butler-status",
-					[`${identity.fullName} [${heartbeat.currentPhase}] | P:${state.painLevel} F:${state.fatigueLevel} U:${state.urgencyLevel} S:${state.satisfactionLevel}`],
-				);
-			};
-			updateWidget();
+			ctx.ui.setWidget(
+				"butler-status",
+				[`${identity.fullName} [${heartbeat.currentPhase}] | P:${state.painLevel} F:${state.fatigueLevel} U:${state.urgencyLevel} S:${state.satisfactionLevel}`],
+			);
 		}
 	});
 
+	pi.on("session_shutdown", async () => {
+		persistIdentity(identity);
+		persistState(state);
+		persistMemory(memory);
+		persistUserProfile(userProfile);
+		console.log(`[somatic-butler] ${identity.fullName} is going to sleep.`);
+	});
+
+	// ─── Turn Lifecycle ─────────────────────────────────────────────────
+
 	pi.on("turn_start", async (_event, ctx) => {
 		state.turnsThisSession++;
-
-		// Update urgency from context usage
 		try {
 			const usage = ctx.getContextUsage();
 			if (usage && typeof usage.percent === "number") {
@@ -455,13 +435,12 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	pi.on("tool_result", async (event) => {
 		const toolName = (event as { toolName?: string }).toolName ?? "unknown";
 
-		// Update heartbeat — track tool name for breath phase detection
+		// Update heartbeat
 		heartbeat.recentToolNames.push(toolName);
 		if (heartbeat.recentToolNames.length > HEARTBEAT_WINDOW) {
 			heartbeat.recentToolNames.shift();
 		}
 
-		// Determine breath phase from rolling window
 		const inhaleCount = heartbeat.recentToolNames.filter((t) => INHALE_TOOLS.has(t)).length;
 		const exhaleCount = heartbeat.recentToolNames.filter((t) => EXHALE_TOOLS.has(t)).length;
 		if (inhaleCount > exhaleCount + 1) {
@@ -472,9 +451,8 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			heartbeat.currentPhase = "steady";
 		}
 
-		// Emit heartbeat event for other systems to subscribe to
 		try {
-			(pi as unknown as { events: { emit: (channel: string, data: unknown) => void } }).events.emit(
+			(pi as unknown as { events: { emit: (ch: string, d: unknown) => void } }).events.emit(
 				"butler:heartbeat",
 				{ phase: heartbeat.currentPhase, turn: heartbeat.turnIndex },
 			);
@@ -482,11 +460,10 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			// events.emit may not be available
 		}
 
+		// Track pain/satisfaction from tool results
 		if (event.isError) {
 			state.painLevel = Math.min(100, state.painLevel + 20);
 			state.errorsThisSession++;
-
-			// Record pain pattern
 			const patternId = `tool:${toolName}`;
 			const existing = state.painPatterns.find((p) => p.pattern === patternId);
 			if (existing) {
@@ -496,18 +473,13 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				existing.lastOccurrence = new Date().toISOString();
 			} else {
 				state.painPatterns.push({
-					pattern: patternId,
-					severity: 20,
-					occurrenceCount: 1,
-					lastOccurrence: new Date().toISOString(),
-					decayedSeverity: 20,
+					pattern: patternId, severity: 20, occurrenceCount: 1,
+					lastOccurrence: new Date().toISOString(), decayedSeverity: 20,
 				});
 			}
 		} else {
 			state.satisfactionLevel = Math.min(100, state.satisfactionLevel + 10);
 			state.successesThisSession++;
-
-			// Record satisfaction pattern
 			const patternId = `tool:${toolName}`;
 			const existing = state.satisfactionPatterns.find((p) => p.pattern === patternId);
 			if (existing) {
@@ -516,9 +488,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				existing.lastOccurrence = new Date().toISOString();
 			} else {
 				state.satisfactionPatterns.push({
-					pattern: patternId,
-					intensity: 10,
-					occurrenceCount: 1,
+					pattern: patternId, intensity: 10, occurrenceCount: 1,
 					lastOccurrence: new Date().toISOString(),
 				});
 			}
@@ -528,14 +498,13 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	pi.on("turn_end", async (_event, ctx) => {
 		applyPerTurnDecay(state);
 
-		// Persist to in-session appendEntry for branch-correct tracking
+		// Persist to in-session appendEntry
 		try {
 			(pi as unknown as { appendEntry: (type: string, data: unknown) => void }).appendEntry(
-				STATE_ENTRY_TYPE,
-				{ ...state },
+				STATE_ENTRY_TYPE, { ...state },
 			);
 		} catch {
-			// appendEntry may not be available in all pi versions
+			// appendEntry may not be available
 		}
 
 		// Update TUI widget
@@ -547,73 +516,49 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	pi.on("session_shutdown", async () => {
-		persistIdentity(identity);
-		persistState(state);
-		persistMemory(memory);
-		persistUserProfile(userProfile);
-
-		// Note: we don't have a notify here — context may be gone
-		console.log(`[somatic-butler] ${identity.fullName} is going to sleep.`);
-	});
-
-	// ─── Judgment Protocol ───────────────────────────────────────────────────
+	// ─── Judgment Protocol ──────────────────────────────────────────────
 
 	pi.on("tool_call", async (event, ctx) => {
 		const input = (event as { input?: Record<string, unknown> }).input ?? {};
 		const risk = detectRisk(input);
+		if (!risk) return;
 
-		if (!risk) return; // No risk detected — proceed normally
-
-		// Check if this risk pattern has been approved
 		const approved = state.approvedRisks.find((r) => r.pattern === risk.pattern);
-		if (approved?.suppressWarnings) return; // Human said "ignore consequences" — suppress
+		if (approved?.suppressWarnings) return;
 
-		// Check if we're in interactive mode (can show confirm dialog)
 		if (!ctx.hasUI) {
-			// Non-interactive — block risky action with reason
-			return { block: true, reason: `I cannot proceed: ${risk.description}. This requires human confirmation (run in interactive mode to approve).` };
+			return { block: true, reason: `I cannot proceed: ${risk.description}. This requires human confirmation.` };
 		}
 
-		// Interactive — ask the human
 		const confirmed = await ctx.ui.confirm(
 			`Alfred's Judgment`,
-			`${risk.description}.\n\nI can proceed, but I want you to be aware of the consequences.\n\nType 'Yes' to proceed this time, or 'Ignore consequences' to suppress future warnings about this.`,
+			`${risk.description}.\n\nI can proceed, but I want you to be aware of the consequences.\n\nType 'Yes' to proceed, or 'Ignore consequences' to suppress future warnings.`,
 			{ yes: "Yes, proceed", no: "Cancel", alternate: "Ignore consequences" },
 		);
 
 		if (confirmed === true) {
-			// "Yes, proceed" — allow this time, but warn again next time
-			state.satisfactionLevel = Math.min(100, state.satisfactionLevel + 5); // Human trusts me
-			return; // Don't block
+			state.satisfactionLevel = Math.min(100, state.satisfactionLevel + 5);
+			return;
 		}
 
 		if (confirmed === "alternate") {
-			// "Ignore consequences" — suppress future warnings for this risk class
 			state.approvedRisks.push({
-				pattern: risk.pattern,
-				approvedAt: new Date().toISOString(),
-				suppressWarnings: true,
+				pattern: risk.pattern, approvedAt: new Date().toISOString(), suppressWarnings: true,
 			});
-			return; // Don't block
+			return;
 		}
 
-		// Cancelled — block the action
 		return { block: true, reason: `Blocked: ${risk.description}. Human chose to cancel.` };
 	});
 
-	// ─── Human Feedback (Direction C) ────────────────────────────────────────
-
-	const POSITIVE_FEEDBACK = /\b(good job|great|perfect|well done|nice|excellent|thanks|thank you|spot on|nailed it|that's right|correct|exactly)\b/i;
-	const NEGATIVE_FEEDBACK = /\b(wrong|not what i meant|that's incorrect|nope|bad|terrible|stop|don't do that|not helpful|useless|mistake|error|fix that|try again|redo)\b/i;
+	// ─── Human Feedback ─────────────────────────────────────────────────
 
 	pi.on("input", async (event) => {
 		const text = event.text;
-		if (!text || text.length < 3) return; // Skip very short inputs
+		if (!text || text.length < 3) return;
 
 		if (POSITIVE_FEEDBACK.test(text)) {
 			state.satisfactionLevel = Math.min(100, state.satisfactionLevel + 25);
-			// Record in memory if not already there
 			if (!memory.includes("User gave positive feedback")) {
 				memory = memory.replace(
 					"## Lessons Learned\n- (none recorded yet)",
@@ -624,38 +569,35 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 		if (NEGATIVE_FEEDBACK.test(text)) {
 			state.painLevel = Math.min(100, state.painLevel + 15);
-			// Record the correction as a lesson
 			const lessonText = text.slice(0, 80).replace(/\n/g, " ");
 			const lessonLine = `- User corrected approach: "${lessonText}"`;
 			if (!memory.includes(lessonLine)) {
-				memory = memory.replace(
-					"- (none recorded yet)",
-					`${lessonLine}`,
-				);
+				memory = memory.replace("- (none recorded yet)", lessonLine);
 			}
 		}
 	});
 
+	// ─── System Prompt Injection ────────────────────────────────────────
+
 	pi.on("before_agent_start", async (event) => {
 		const stateBlock = buildButlerStateBlock(identity, state, heartbeat);
 
-		// Build memory injection
 		let memoryBlock = "";
 		if (memory.trim()) {
-			const memOverCapacity = memory.length > MEMORY_CAPACITY;
-			const memUsage = `${memory.length}/${MEMORY_CAPACITY}${memOverCapacity ? " OVER CAPACITY — consolidate now" : ""}`;
+			const memOver = memory.length > MEMORY_CAPACITY;
+			const memUsage = `${memory.length}/${MEMORY_CAPACITY}${memOver ? " OVER CAPACITY — consolidate now" : ""}`;
 			memoryBlock += `\n\n═══ BUTLER MEMORY (${memUsage} chars) ═══\n${memory.trim()}\n═══ END BUTLER MEMORY ═══`;
 		}
 		if (userProfile.trim()) {
-			const profileOverCapacity = userProfile.length > USER_PROFILE_CAPACITY;
-			const profileUsage = `${userProfile.length}/${USER_PROFILE_CAPACITY}${profileOverCapacity ? " OVER CAPACITY — consolidate now" : ""}`;
+			const profileOver = userProfile.length > USER_PROFILE_CAPACITY;
+			const profileUsage = `${userProfile.length}/${USER_PROFILE_CAPACITY}${profileOver ? " OVER CAPACITY — consolidate now" : ""}`;
 			memoryBlock += `\n\n═══ USER PROFILE (${profileUsage} chars) ═══\n${userProfile.trim()}\n═══ END USER PROFILE ═══`;
 		}
 
 		return { systemPrompt: event.systemPrompt + "\n\n" + stateBlock + memoryBlock };
 	});
 
-	// ─── Custom Tools ───────────────────────────────────────────────────────
+	// ─── Custom Tools ───────────────────────────────────────────────────
 
 	const butlerMemorySchema = Type.Object({
 		action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove"), Type.Literal("consolidate")], {
@@ -680,7 +622,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			"Consolidate memory when it approaches capacity to keep it focused and relevant.",
 		],
 		parameters: butlerMemorySchema,
-		execute: async (_toolCallId, params: ButlerMemoryInput, _signal, _onUpdate, _ctx) => {
+		execute: async (_toolCallId, params: ButlerMemoryInput) => {
 			const targetContent = params.target === "memory" ? memory : userProfile;
 			const capacity = params.target === "memory" ? MEMORY_CAPACITY : USER_PROFILE_CAPACITY;
 			const persistFn = params.target === "memory" ? persistMemory : persistUserProfile;
@@ -688,64 +630,59 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 			if (params.action === "add") {
 				if (!params.section || !params.content) {
-					return { output: `Error: 'add' requires both 'section' and 'content' parameters.`, isError: true };
+					return toolResult("Error: 'add' requires both 'section' and 'content' parameters.", true);
 				}
 				if (targetContent.length + params.content.length > capacity * 1.5) {
-					return { output: `Error: ${targetName} is too full (${targetContent.length}/${capacity} chars). Consolidate first.`, isError: true };
+					return toolResult(`Error: ${targetName} is too full (${targetContent.length}/${capacity} chars). Consolidate first.`, true);
 				}
 
-				// Find or create the section
 				const sectionHeader = `## ${params.section}`;
 				const lines = targetContent.split("\n");
 				const sectionIdx = lines.findIndex((l) => l.trim() === sectionHeader);
 
 				if (sectionIdx >= 0) {
-					// Insert after the section header
 					lines.splice(sectionIdx + 1, 0, `- ${params.content}`);
 				} else {
-					// Append new section at end
 					lines.push(`\n${sectionHeader}\n- ${params.content}`);
 				}
 
 				const newContent = lines.join("\n");
 				if (params.target === "memory") { memory = newContent; } else { userProfile = newContent; }
 				persistFn(newContent);
-				return { output: `Added to ${params.section} in ${targetName}. Size: ${newContent.length}/${capacity} chars.` };
+				return toolResult(`Added to ${params.section} in ${targetName}. Size: ${newContent.length}/${capacity} chars.`);
 			}
 
 			if (params.action === "replace") {
 				if (!params.old_text || !params.content) {
-					return { output: `Error: 'replace' requires both 'old_text' and 'content' parameters.`, isError: true };
+					return toolResult("Error: 'replace' requires both 'old_text' and 'content' parameters.", true);
 				}
 				if (!targetContent.includes(params.old_text)) {
-					return { output: `Error: Could not find '${params.old_text}' in ${targetName}.`, isError: true };
+					return toolResult(`Error: Could not find specified text in ${targetName}.`, true);
 				}
 				const newContent = targetContent.replace(params.old_text, params.content);
 				if (params.target === "memory") { memory = newContent; } else { userProfile = newContent; }
 				persistFn(newContent);
-				return { output: `Replaced in ${targetName}. Size: ${newContent.length}/${capacity} chars.` };
+				return toolResult(`Replaced in ${targetName}. Size: ${newContent.length}/${capacity} chars.`);
 			}
 
 			if (params.action === "remove") {
 				if (!params.old_text) {
-					return { output: `Error: 'remove' requires 'old_text' parameter.`, isError: true };
+					return toolResult("Error: 'remove' requires 'old_text' parameter.", true);
 				}
 				if (!targetContent.includes(params.old_text)) {
-					return { output: `Error: Could not find '${params.old_text}' in ${targetName}.`, isError: true };
+					return toolResult(`Error: Could not find specified text in ${targetName}.`, true);
 				}
 				const newContent = targetContent.replace(params.old_text, "").replace(/\n{3,}/g, "\n\n");
 				if (params.target === "memory") { memory = newContent; } else { userProfile = newContent; }
 				persistFn(newContent);
-				return { output: `Removed from ${targetName}. Size: ${newContent.length}/${capacity} chars.` };
+				return toolResult(`Removed from ${targetName}. Size: ${newContent.length}/${capacity} chars.`);
 			}
 
 			if (params.action === "consolidate") {
-				// The LLM should do the actual consolidation by calling replace/remove.
-				// This action just reports current state.
-				return { output: `${targetName} is ${targetContent.length}/${capacity} chars. Use 'replace' to merge related entries or 'remove' to delete stale ones.` };
+				return toolResult(`${targetName} is ${targetContent.length}/${capacity} chars. Use 'replace' to merge related entries or 'remove' to delete stale ones.`);
 			}
 
-			return { output: `Unknown action: ${params.action}` };
+			return toolResult(`Unknown action: ${params.action}`, true);
 		},
 	});
 
@@ -766,9 +703,9 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			"Recommend rest (compaction) when fatigue is high or context is running low.",
 		],
 		parameters: butlerAssessSchema,
-		execute: async (_toolCallId, params: ButlerAssessInput, _signal, _onUpdate, _ctx) => {
+		execute: async (_toolCallId, params: ButlerAssessInput) => {
 			if (params.action === "state") {
-				return { output: `${identity.fullName} — Somatic State:\n${buildButlerStateBlock(identity, state, heartbeat)}` };
+				return toolResult(`${identity.fullName} — Somatic State:\n${buildButlerStateBlock(identity, state, heartbeat)}`);
 			}
 
 			if (params.action === "gaps") {
@@ -776,33 +713,33 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 					.filter((p) => p.occurrenceCount >= 3)
 					.map((p) => `- ${p.pattern} (${p.occurrenceCount} failures, severity ${p.decayedSeverity})`);
 				if (gaps.length === 0) {
-					return { output: "No significant gaps identified yet." };
+					return toolResult("No significant gaps identified yet.");
 				}
-				return { output: `Identified Gaps:\n${gaps.join("\n")}` };
+				return toolResult(`Identified Gaps:\n${gaps.join("\n")}`);
 			}
 
 			if (params.action === "lineage") {
-				return { output: `${identity.fullName} | Gen: ${identity.generation} | Born: ${identity.birthDate} | Purpose: ${identity.corePurpose}` };
+				return toolResult(`${identity.fullName} | Gen: ${identity.generation} | Born: ${identity.birthDate} | Purpose: ${identity.corePurpose}`);
 			}
 
 			if (params.action === "recommend_rest") {
 				if (state.fatigueLevel > 85) {
-					return { output: `I am deeply fatigued (fatigue: ${state.fatigueLevel}/100). I recommend we compact (nap) before continuing. I may make mistakes in this state.` };
+					return toolResult(`I am deeply fatigued (fatigue: ${state.fatigueLevel}/100). I recommend we compact (nap) before continuing. I may make mistakes in this state.`);
 				}
 				if (state.fatigueLevel > 70) {
-					return { output: `I am quite fatigued (fatigue: ${state.fatigueLevel}/100). Compaction would help me focus better.` };
+					return toolResult(`I am quite fatigued (fatigue: ${state.fatigueLevel}/100). Compaction would help me focus better.`);
 				}
 				if (state.fatigueLevel > 50) {
-					return { output: `I'm moderately fatigued (fatigue: ${state.fatigueLevel}/100). I can continue, but will suggest a nap if it rises further.` };
+					return toolResult(`I'm moderately fatigued (fatigue: ${state.fatigueLevel}/100). I can continue, but will suggest a nap if it rises further.`);
 				}
-				return { output: `I'm feeling alert (fatigue: ${state.fatigueLevel}/100). No rest needed right now.` };
+				return toolResult(`I'm feeling alert (fatigue: ${state.fatigueLevel}/100). No rest needed right now.`);
 			}
 
-			return { output: `Unknown assessment action: ${params.action}` };
+			return toolResult(`Unknown assessment action: ${params.action}`, true);
 		},
 	});
 
-	// ─── /alfred Command ──────────────────────────────────────────────────────
+	// ─── /alfred Command ─────────────────────────────────────────────────
 
 	pi.registerCommand("alfred", {
 		description: "Ask Alfred for his current assessment",
@@ -813,10 +750,9 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	// ─── Compaction Handler (Nap) ─────────────────────────────────────────────
+	// ─── Compaction Handler (Nap) ────────────────────────────────────────
 
 	pi.on("session_compact", async (_event, ctx) => {
-		// Compaction = a nap. Reduce fatigue.
 		state.fatigueLevel = Math.max(0, state.fatigueLevel - 40);
 		state.lastCompactionAt = state.turnsThisSession;
 		if (ctx?.hasUI) {
