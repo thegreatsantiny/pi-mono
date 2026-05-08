@@ -314,14 +314,48 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("tool_result", async (event) => {
+		const toolName = (event as { toolName?: string }).toolName ?? "unknown";
+
 		if (event.isError) {
 			state.painLevel = Math.min(100, state.painLevel + 20);
 			state.errorsThisSession++;
-			// TODO: record pain pattern
+
+			// Record pain pattern
+			const patternId = `tool:${toolName}`;
+			const existing = state.painPatterns.find((p) => p.pattern === patternId);
+			if (existing) {
+				existing.severity = Math.min(100, existing.severity + 20);
+				existing.decayedSeverity = existing.severity;
+				existing.occurrenceCount++;
+				existing.lastOccurrence = new Date().toISOString();
+			} else {
+				state.painPatterns.push({
+					pattern: patternId,
+					severity: 20,
+					occurrenceCount: 1,
+					lastOccurrence: new Date().toISOString(),
+					decayedSeverity: 20,
+				});
+			}
 		} else {
 			state.satisfactionLevel = Math.min(100, state.satisfactionLevel + 10);
 			state.successesThisSession++;
-			// TODO: record satisfaction pattern
+
+			// Record satisfaction pattern
+			const patternId = `tool:${toolName}`;
+			const existing = state.satisfactionPatterns.find((p) => p.pattern === patternId);
+			if (existing) {
+				existing.intensity = Math.min(100, existing.intensity + 10);
+				existing.occurrenceCount++;
+				existing.lastOccurrence = new Date().toISOString();
+			} else {
+				state.satisfactionPatterns.push({
+					pattern: patternId,
+					intensity: 10,
+					occurrenceCount: 1,
+					lastOccurrence: new Date().toISOString(),
+				});
+			}
 		}
 	});
 
