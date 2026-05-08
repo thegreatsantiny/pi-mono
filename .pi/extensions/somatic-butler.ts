@@ -531,7 +531,45 @@ function timeSince(isoTimestamp: string): string {
 	return `${hours}h ago`;
 }
 
-// ─── Human Feedback Patterns ─────────────────────────────────────────────
+// ─── Child Genome Detection ───────────────────────────────────────────
+
+interface DetectedGenome {
+	isChild: true;
+	fullName: string;
+	generation: number;
+	personalName: string;
+	familyName: string;
+	corePurpose: string;
+	parentId: string;
+}
+
+/**
+ * Detect a child butler genome from the system prompt.
+ * When @tintinweb/pi-subagents spawns a child with our agent definition,
+ * the system prompt contains lines like:
+ *   "You are Pennyworth-G1-Scout, a child butler of the Pennyworth family (Generation 1)"
+ *   "Parent: Pennyworth-G0-Alfred"
+ *   "Core Purpose: Quick reconnaissance"
+ */
+function detectChildGenome(systemPrompt: string): DetectedGenome | null {
+	const childMatch = systemPrompt.match(
+		/You are (\w+-G(\d+)-(\w+)), a child butler of the (\w+) family \(Generation (\d+)\)/,
+	);
+	if (!childMatch) return null;
+
+	const parentMatch = systemPrompt.match(/^Parent: (.+)$/m);
+	const purposeMatch = systemPrompt.match(/^Core Purpose: (.+)$/m);
+
+	return {
+		isChild: true,
+		fullName: childMatch[1],
+		generation: Number.parseInt(childMatch[2], 10),
+		personalName: childMatch[3],
+		familyName: childMatch[4],
+		corePurpose: purposeMatch?.[1] ?? "Unknown purpose",
+		parentId: parentMatch?.[1] ?? "unknown",
+	};
+}
 
 const POSITIVE_FEEDBACK = /\b(good job|great|perfect|well done|nice|excellent|thanks|thank you|spot on|nailed it|that's right|correct|exactly)\b/i;
 const NEGATIVE_FEEDBACK = /\b(wrong|not what i meant|that's incorrect|nope|bad|terrible|stop|don't do that|not helpful|useless|mistake|error|fix that|try again|redo)\b/i;
@@ -587,10 +625,74 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	// ─── Session Lifecycle ──────────────────────────────────────────────
 
 	pi.on("session_start", async (_event, ctx) => {
-		identity = loadOrCreateIdentity();
-		state = loadOrCreateState();
-		memory = loadOrCreateFile(getMemoryPath(), DEFAULT_MEMORY);
-		userProfile = loadOrCreateFile(getUserProfilePath(), DEFAULT_USER_PROFILE);
+		// Check for BUTLER_CHILD_GENOME env var — allows manual child activation
+		// e.g., BUTLER_CHILD_GENOME=/path/to/scout-genome.json pi
+		const genomeEnvPath = process.env.BUTLER_CHILD_GENOME;
+		if (genomeEnvPath && fs.existsSync(genomeEnvPath)) {
+			const genome = JSON.parse(fs.readFileSync(genomeEnvPath, "utf-8")) as ChildGenome;
+			identity = {
+				familyName: genome.familyName,
+				generation: genome.generation,
+				personalName: genome.personalName,
+				fullName: genome.fullName,
+				birthDate: genome.birthDate,
+				creatorId: genome.parentId,
+				corePurpose: genome.corePurpose,
+			};
+
+			const childButlerDir = path.join(getBaseDir(), ".pi", "butlers", genome.personalName.toLowerCase());
+			fs.mkdirSync(childButlerDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(childButlerDir, "identity.json"),
+				JSON.stringify(identity, null, 2),
+				"utf-8",
+			);
+
+			// Load child state (fresh or from previous run)
+			const childStatePath = path.join(childButlerDir, "state.json");
+			if (fs.existsSync(childStatePath)) {
+				state = JSON.parse(fs.readFileSync(childStatePath, "utf-8")) as SomaticState;
+			} else {
+				state = createDefaultState();
+				// Inherit approved risks from genome
+				for (const pattern of genome.inheritedRisks) {
+					state.approvedRisks.push({ pattern, approvedAt: new Date().toISOString(), suppressWarnings: true });
+				}
+			}
+
+			memory = loadOrCreateFile(
+				path.join(childButlerDir, "memory.md"),
+				DEFAULT_MEMORY.replace("Pennyworth-G0-Alfred", genome.fullName),
+			);
+			userProfile = loadOrCreateFile(
+				path.join(childButlerDir, "user-profile.md"),
+				DEFAULT_USER_PROFILE,
+			);
+
+			ctx.ui.notify(`${identity.fullName} (child of ${genome.parentId}) is waking up.`, "info");
+
+			// Record birth in lineage if not already present
+			if (!hasBirthEntry(identity.fullName)) {
+				const birthEntry: LineageBirthEntry = {
+					type: "birth",
+					id: identity.fullName,
+					parent: genome.parentId,
+					generation: identity.generation,
+					personalName: identity.personalName,
+					familyName: identity.familyName,
+					corePurpose: identity.corePurpose,
+					inheritedGaps: genome.inheritedGaps,
+					birthDate: identity.birthDate,
+					creatorId: genome.parentId,
+				};
+				appendLineageEntry(birthEntry);
+			}
+		} else {
+			identity = loadOrCreateIdentity();
+			state = loadOrCreateState();
+			memory = loadOrCreateFile(getMemoryPath(), DEFAULT_MEMORY);
+			userProfile = loadOrCreateFile(getUserProfilePath(), DEFAULT_USER_PROFILE);
+		}
 
 		// Replay in-session state entries for branch-correct state
 		try {
@@ -643,8 +745,19 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
-		persistIdentity(identity);
-		persistState(state);
+		// Persist to the correct butler directory (child or parent)
+		const butlerDir = identity.fullName !== `${DEFAULT_FAMILY_NAME}-G${GENERATION}-${DEFAULT_NAME}`
+			? path.join(getBaseDir(), ".pi", "butlers", identity.personalName.toLowerCase())
+			: getButlerDir();
+
+		if (butlerDir !== getButlerDir()) {
+			fs.mkdirSync(butlerDir, { recursive: true });
+		}
+
+		const identityPath = path.join(butlerDir, "identity.json");
+		const statePath = path.join(butlerDir, "state.json");
+		fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2), "utf-8");
+		fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf-8");
 		persistMemory(memory);
 		persistUserProfile(userProfile);
 
@@ -815,9 +928,43 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		}
 	});
 
-	// ─── System Prompt Injection ────────────────────────────────────────
+	// ─── System Prompt Injection (with child genome detection) ──────────
 
 	pi.on("before_agent_start", async (event) => {
+		// Check if this session is a child butler spawned by subagents
+		const genome = detectChildGenome(event.systemPrompt);
+		if (genome) {
+			// Override identity for this child session
+			identity = {
+				familyName: genome.familyName,
+				generation: genome.generation,
+				personalName: genome.personalName,
+				fullName: genome.fullName,
+				birthDate: new Date().toISOString(),
+				creatorId: genome.parentId,
+				corePurpose: genome.corePurpose,
+			};
+
+			// Child starts fresh — no inherited pain/fatigue, but inherits approved risks
+			state = createDefaultState();
+			// Parse inherited risks from the system prompt
+			const riskMatches = event.systemPrompt.match(/^- (.+:\S+)$/gm) ?? [];
+			for (const rm of riskMatches) {
+				const pattern = rm.replace(/^- /, "");
+				if (pattern.includes(":")) {
+					state.approvedRisks.push({ pattern, approvedAt: new Date().toISOString(), suppressWarnings: true });
+				}
+			}
+
+			// Load child-specific memory/profile or use defaults
+			const childButlerDir = path.join(getBaseDir(), ".pi", "butlers", genome.personalName.toLowerCase());
+			const childMemoryPath = path.join(childButlerDir, "memory.md");
+			const childUserProfilePath = path.join(childButlerDir, "user-profile.md");
+
+			memory = loadOrCreateFile(childMemoryPath, DEFAULT_MEMORY.replace("Pennyworth-G0-Alfred", genome.fullName));
+			userProfile = loadOrCreateFile(childUserProfilePath, DEFAULT_USER_PROFILE);
+		}
+
 		const stateBlock = buildButlerStateBlock(identity, state, heartbeat);
 
 		let memoryBlock = "";
