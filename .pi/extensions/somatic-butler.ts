@@ -746,7 +746,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		// Persist to the correct butler directory (child or parent)
-		const butlerDir = identity.fullName !== `${DEFAULT_FAMILY_NAME}-G${GENERATION}-${DEFAULT_NAME}`
+		const butlerDir = identity.generation > 0
 			? path.join(getBaseDir(), ".pi", "butlers", identity.personalName.toLowerCase())
 			: getButlerDir();
 
