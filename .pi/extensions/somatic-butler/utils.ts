@@ -239,28 +239,73 @@ export function writeChildAgentDefinition(genome: ChildGenome): string {
 	const agentName = `butler-${genome.personalName.toLowerCase()}`;
 	const agentsDir = getAgentsDir();
 	fs.mkdirSync(agentsDir, { recursive: true });
-	const wisdomLines = genome.inheritedWisdom.length > 0 ? genome.inheritedWisdom.map((w) => `- ${w}`).join("\n") : "- (none inherited)";
-	const gapsLines = genome.inheritedGaps.length > 0 ? genome.inheritedGaps.map((g) => `- ${g}`).join("\n") : "- (none identified)";
-	const risksLines = genome.inheritedRisks.length > 0 ? genome.inheritedRisks.map((r) => `- ${r}`).join("\n") : "- (none approved)";
-	const frontmatter = [`description: ${genome.corePurpose}`, `display_name: ${genome.fullName}`, `run_in_background: true`, `extensions: true`, `skills: true`];
+
+	const wisdomLines = genome.inheritedWisdom.length > 0
+		? genome.inheritedWisdom.map((w) => `- ${w}`).join("\n")
+		: "- (none inherited)";
+	const risksLines = genome.inheritedRisks.length > 0
+		? genome.inheritedRisks.map((r) => `- ${r}`).join("\n")
+		: "- (none approved)";
+
+	const frontmatter = [
+		`description: ${genome.corePurpose}`,
+		`display_name: ${genome.fullName}`,
+		`run_in_background: true`,
+		`extensions: true`,
+		`skills: true`,
+	];
 	if (genome.childModel) frontmatter.push(`model: ${genome.childModel}`);
-	const systemPrompt = [
-		`You are ${genome.fullName}, a child butler of the ${genome.familyName} family (Generation ${genome.generation}).`,
-		`Born: ${genome.birthDate}`,
-		`Parent: ${genome.parentId}`,
-		`Core Purpose: ${genome.corePurpose}`,
-		"",
-		"## Inherited Wisdom",
-		wisdomLines,
-		"",
-		"## Known Gaps (proceed with caution)",
-		gapsLines,
-		"",
-		"## Pre-Approved Risk Patterns",
-		risksLines,
-		"",
-		"You are autonomous, focused, and efficient. Complete your task and report back.",
-	].join("\n");
+	// Territory declarations
+	if (genome.toolsAllowed && genome.toolsAllowed.length > 0) {
+		frontmatter.push(`tools: ${JSON.stringify(genome.toolsAllowed)}`);
+	}
+	if (genome.toolsDisallowed && genome.toolsDisallowed.length > 0) {
+		frontmatter.push(`disallowed_tools: ${JSON.stringify(genome.toolsDisallowed)}`);
+	}
+
+	let systemPrompt: string;
+	if (genome.isWorker) {
+		// Temp worker — task-focused, coordination protocol
+		systemPrompt = [
+			`You are ${genome.personalName}, a temporary worker hired by ${genome.parentId}.`,
+			`Task: ${genome.corePurpose}`,
+			"",
+			"## Relevant Wisdom",
+			wisdomLines,
+			"",
+			"## Pre-Approved Risk Patterns",
+			risksLines,
+			"",
+			"## Coordination Protocol",
+			"- Focus exclusively on your assigned task.",
+			"- Do NOT modify files outside your task scope (territory restriction).",
+			"- When complete, summarize your findings concisely.",
+			"- You are a temporary hire, not a successor — do not write lineage entries.",
+			"",
+			"You are efficient, focused, and thorough. Complete your task and report back.",
+		].join("\n");
+	} else {
+		// Successor — inherited identity, gaps to fill
+		const gapsLines = genome.inheritedGaps.length > 0
+			? genome.inheritedGaps.map((g) => `- ${g}`).join("\n")
+			: "- (none identified)";
+		systemPrompt = [
+			`You are ${genome.fullName}, successor to ${genome.parentId} (Generation ${genome.generation}).`,
+			`Core Purpose: ${genome.corePurpose}`,
+			"",
+			"## Inherited Wisdom",
+			wisdomLines,
+			"",
+			"## Gaps to Fill",
+			gapsLines,
+			"",
+			"## Pre-Approved Risk Patterns",
+			risksLines,
+			"",
+			"You are the continuation of the Pennyworth line. Inherit what worked, learn from what didn't. Serve with judgment and dignity.",
+		].join("\n");
+	}
+
 	const agentContent = `---\n${frontmatter.join("\n")}\n---\n\n${systemPrompt}`;
 	fs.writeFileSync(path.join(agentsDir, `${agentName}.md`), agentContent, "utf-8");
 	return agentName;

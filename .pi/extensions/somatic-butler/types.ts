@@ -120,6 +120,12 @@ export interface ChildGenome {
 	inheritedRisks: string[];
 	childModel?: string;
 	birthDate: string;
+	/** Is this a temp worker (not a successor)? Changes system prompt and lineage behavior. */
+	isWorker?: boolean;
+	/** Tools this agent is allowed to use (territory declaration). Empty = all tools. */
+	toolsAllowed?: string[];
+	/** Tools this agent is NOT allowed to use (territory restriction). */
+	toolsDisallowed?: string[];
 }
 
 // ─── Heartbeat ────────────────────────────────────────────────────────────

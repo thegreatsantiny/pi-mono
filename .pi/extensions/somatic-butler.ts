@@ -677,6 +677,9 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				inheritedRisks: st(bs).approvedRisks.map((r) => r.pattern),
 				childModel: params.worker_model ?? undefined,
 				birthDate: new Date().toISOString(),
+				isWorker: true,
+				toolsAllowed: params.tools_allowed,
+				toolsDisallowed: params.tools_disallowed,
 			};
 			const childrenDir = path.join(getButlerDir(), "children");
 			fs.mkdirSync(childrenDir, { recursive: true });
