@@ -54,6 +54,7 @@ import {
 	detectChildGenome,
 	addToSomaticSection,
 	buildButlerStateBlock,
+	readLineage,
 	promotePainToLessons,
 	updateGapsFromPain,
 	formatGapsForMemory,
@@ -89,17 +90,25 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		});
 
 		bs.piEvents.on("subagents:completed", (data: unknown) => {
-			const result = data as { id?: string; agentType?: string; success?: boolean };
+			const result = data as { id?: string; agentType?: string; success?: boolean; output?: string };
 			if (result.agentType?.startsWith("butler-")) {
-				// TODO: write findings to family context instead of death entry
-				const deathEntry: LineageDeathEntry = {
-					type: "death",
-					id: result.id ?? result.agentType,
-					deathDate: new Date().toISOString(),
-					cause: "context-overflow",
-					bequeathal: { wisdom: [], gaps: [], approvedRisks: [], failedApproaches: [], unfinishedPurpose: "Child session completed" },
-				};
-				appendLineageEntry(deathEntry);
+				// Temp workers report findings to family context (not lineage)
+				const familyContextPath = path.join(getButlerDir(), "family-context.json");
+				let familyContext: { activeWorkers: unknown[]; findings: { workerName: string; completedAt: string; success: boolean; output?: string }[] } = { activeWorkers: [], findings: [] };
+				if (fs.existsSync(familyContextPath)) {
+					try { familyContext = JSON.parse(fs.readFileSync(familyContextPath, "utf-8")); } catch { /* corrupted */ }
+				}
+				const workerName = result.agentType.replace("butler-", "");
+				familyContext.activeWorkers = familyContext.activeWorkers.filter(
+					(w) => (w as { name?: string }).name !== workerName,
+				);
+				familyContext.findings.push({
+					workerName,
+					completedAt: new Date().toISOString(),
+					success: result.success ?? false,
+					output: result.output?.slice(0, 500),
+				});
+				fs.writeFileSync(familyContextPath, JSON.stringify(familyContext, null, 2), "utf-8");
 			}
 		});
 	}
@@ -147,9 +156,77 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				});
 			}
 		} else {
-			bs.identity = loadOrCreateIdentity();
-			bs.state = loadOrCreateState();
-			bs.somaticMemory = loadOrCreateFile(getSomaticMemoryPath(), DEFAULT_SOMATIC_MEMORY);
+			// Check for succession: if last lineage entry is a context-overflow death
+			// with a successor genome, activate the successor
+			const lineage = readLineage();
+			const lastEntry = lineage[lineage.length - 1];
+			const lastDeath = lastEntry?.type === "death" ? lastEntry : null;
+			let activatedSuccession = false;
+
+			if (lastDeath?.cause === "context-overflow" && lastDeath.id === loadOrCreateIdentity().fullName) {
+				// Check for successor genome
+				const childrenDir = path.join(getButlerDir(), "children");
+				const genomeFiles = fs.existsSync(childrenDir) ? fs.readdirSync(childrenDir).filter((f) => f.startsWith("successor-")) : [];
+				if (genomeFiles.length > 0) {
+					const latestGenome = genomeFiles.sort().reverse()[0];
+					const genomePath = path.join(childrenDir, latestGenome);
+					const genome = JSON.parse(fs.readFileSync(genomePath, "utf-8")) as ChildGenome;
+					bs.identity = {
+						familyName: genome.familyName,
+						generation: genome.generation,
+						personalName: genome.personalName,
+						fullName: genome.fullName,
+						birthDate: genome.birthDate,
+						creatorId: genome.parentId,
+						corePurpose: genome.corePurpose,
+					};
+					const successorDir = path.join(getBaseDir(), ".pi", "butlers", genome.familyName.toLowerCase());
+					fs.mkdirSync(successorDir, { recursive: true });
+					fs.writeFileSync(path.join(successorDir, "identity.json"), JSON.stringify(bs.identity, null, 2), "utf-8");
+					bs.state = loadOrCreateState();
+					// Inherit approved risks from predecessor
+					for (const risk of genome.inheritedRisks) {
+						if (!st(bs).approvedRisks.some((r) => r.pattern === risk)) {
+							st(bs).approvedRisks.push({ pattern: risk, approvedAt: new Date().toISOString(), suppressWarnings: true });
+						}
+					}
+					bs.somaticMemory = loadOrCreateFile(getSomaticMemoryPath(), DEFAULT_SOMATIC_MEMORY);
+					// Write inherited wisdom and gaps to somatic memory
+					for (const w of genome.inheritedWisdom) {
+						if (!bs.somaticMemory.includes(w)) {
+							bs.somaticMemory = addToSomaticSection(bs.somaticMemory, "permanentLessons", w);
+						}
+					}
+					for (const g of genome.inheritedGaps) {
+						if (!bs.somaticMemory.includes(g)) {
+							bs.somaticMemory = addToSomaticSection(bs.somaticMemory, "identifiedGaps", g);
+						}
+					}
+					// Write succession birth entry
+					if (!hasBirthEntry(id(bs).fullName)) {
+						appendLineageEntry({
+							type: "birth",
+							id: id(bs).fullName,
+							parent: genome.parentId,
+							generation: id(bs).generation,
+							personalName: id(bs).personalName,
+							familyName: id(bs).familyName,
+							corePurpose: id(bs).corePurpose,
+							inheritedGaps: genome.inheritedGaps,
+							birthDate: id(bs).birthDate,
+							creatorId: genome.parentId,
+						});
+					}
+					activatedSuccession = true;
+					ctx.ui.notify(`Succession: ${id(bs).fullName} activated. Inherited ${genome.inheritedWisdom.length} wisdom, ${genome.inheritedGaps.length} gaps.`, "info");
+				}
+			}
+
+			if (!activatedSuccession) {
+				bs.identity = loadOrCreateIdentity();
+				bs.state = loadOrCreateState();
+				bs.somaticMemory = loadOrCreateFile(getSomaticMemoryPath(), DEFAULT_SOMATIC_MEMORY);
+			}
 		}
 
 		// Replay in-session state entries for branch-correct state
@@ -255,10 +332,31 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			(pi as unknown as { appendEntry: (type: string, data: unknown) => void }).appendEntry(STATE_ENTRY_TYPE, { ...bs.state });
 		} catch { /* appendEntry may not be available */ }
 		if (st(bs).urgencyLevel >= 90 && !st(bs)._overflowDeathWritten) {
+			const bequeathal = buildBequeathal(bs.identity, bs.state, bs.somaticMemory);
 			appendLineageEntry({
 				type: "death", id: id(bs).fullName, deathDate: new Date().toISOString(),
-				cause: "context-overflow", bequeathal: buildBequeathal(bs.identity, bs.state, bs.somaticMemory),
+				cause: "context-overflow", bequeathal,
 			});
+			// Emergency succession — write successor genome for next session
+			const successorGeneration = id(bs).generation + 1;
+			const successorGenome: ChildGenome = {
+				familyName: id(bs).familyName,
+				generation: successorGeneration,
+				personalName: id(bs).personalName,
+				fullName: `${id(bs).familyName}-G${successorGeneration}-${id(bs).personalName}`,
+				corePurpose: id(bs).corePurpose,
+				parentId: id(bs).fullName,
+				inheritedWisdom: bequeathal.wisdom,
+				inheritedGaps: bequeathal.gaps,
+				inheritedRisks: st(bs).approvedRisks.map((r) => r.pattern),
+				birthDate: new Date().toISOString(),
+			};
+			const childrenDir = path.join(getButlerDir(), "children");
+			fs.mkdirSync(childrenDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(childrenDir, `successor-g${successorGeneration}-genome.json`),
+				JSON.stringify(successorGenome, null, 2), "utf-8",
+			);
 			st(bs)._overflowDeathWritten = true;
 		}
 		if (ctx?.hasUI) ctx.ui.setWidget("butler-status", [formatWidget(bs)]);
@@ -447,8 +545,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				return toolResult(`Identified Gaps:\n${gapLines.join("\n")}`);
 			}
 			if (params.action === "lineage") {
-				const { readLineage } = await import("./somatic-butler/utils.js");
-				const lineage = readLineage();
+								const lineage = readLineage();
 				const births = lineage.filter((e): e is LineageBirthEntry => e.type === "birth");
 				const deaths = lineage.filter((e): e is LineageDeathEntry => e.type === "death");
 				const lines = [
@@ -481,84 +578,188 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 	// ─── Reproduction via @tintinweb/pi-subagents ──────────────────────
 
+	// ─── Succession: butler_bequeath ────────────────────────────────────
+	// Called when Alfred dies (retire/overflow). The successor IS the next Alfred.
 	pi.registerTool({
-		name: "butler_spawn",
-		label: "Butler Reproduction",
-		description: "Spawn a child butler to fill an identified gap. The child inherits your wisdom, gaps, and approved risks.",
-		promptSnippet: "butler_spawn — spawn a child butler to fill a capability gap",
+		name: "butler_bequeath",
+		label: "Butler Succession",
+		description: "Bequeath your knowledge to your successor on retirement or context overflow. The successor is the next Alfred — same family name, same personal name, generation+1. Inherits wisdom, gaps, risks, and unfinished purpose. This is for SUCCESSION (Alfred dies → next Alfred), not for hiring temp workers. Use butler_hire for temporary help.",
+		promptSnippet: "butler_bequeath — pass your knowledge to the next Alfred on succession",
 		promptGuidelines: [
-			"Only spawn a child when you've identified a genuine gap you cannot fill.",
-			"Design the child's purpose to specifically address the gap.",
+			"Use butler_bequeath only when retiring or when context overflow is imminent.",
+			"The successor keeps the same personal name (Alfred) and family name (Pennyworth).",
+			"For hiring temporary workers, use butler_hire instead.",
 		],
 		parameters: Type.Object({
-			child_name: Type.String({ description: "Name for the child butler (e.g., 'Scout', 'Forge')" }),
-			child_purpose: Type.String({ description: "The child's core purpose — what gap it fills" }),
-			child_model: Type.Optional(Type.String({ description: "Model for the child (default: same as parent)" })),
-			run_in_background: Type.Optional(Type.Boolean({ description: "Run child in background (default: true)" })),
+			successor_purpose: Type.Optional(Type.String({ description: "Override the successor's core purpose (default: inherit parent's purpose)" })),
+			successor_model: Type.Optional(Type.String({ description: "Model for the successor (default: same as parent)" })),
 		}),
 		execute: async (_toolCallId, params) => {
-			if (process.env.ALFRED_NO_REPRO === "1") return toolResult("Child spawning is currently paused.", true);
-			const childGeneration = id(bs).generation + 1;
-			const childFullName = `${id(bs).familyName}-G${childGeneration}-${params.child_name}`;
+			const successorGeneration = id(bs).generation + 1;
+			const successorFullName = `${id(bs).familyName}-G${successorGeneration}-${id(bs).personalName}`;
 			const bequeathal = buildBequeathal(bs.identity, bs.state, bs.somaticMemory);
 			const genome: ChildGenome = {
-				familyName: id(bs).familyName, generation: childGeneration,
-				personalName: params.child_name, fullName: childFullName,
-				corePurpose: params.child_purpose, parentId: id(bs).fullName,
-				inheritedWisdom: bequeathal.wisdom, inheritedGaps: bequeathal.gaps,
+				familyName: id(bs).familyName,
+				generation: successorGeneration,
+				personalName: id(bs).personalName, // Same name — the successor IS the next Alfred
+				fullName: successorFullName,
+				corePurpose: params.successor_purpose ?? id(bs).corePurpose,
+				parentId: id(bs).fullName,
+				inheritedWisdom: bequeathal.wisdom,
+				inheritedGaps: bequeathal.gaps,
 				inheritedRisks: st(bs).approvedRisks.map((r) => r.pattern),
-				childModel: params.child_model ?? undefined, birthDate: new Date().toISOString(),
+				childModel: params.successor_model ?? undefined,
+				birthDate: new Date().toISOString(),
 			};
 			const childrenDir = path.join(getButlerDir(), "children");
 			fs.mkdirSync(childrenDir, { recursive: true });
-			fs.writeFileSync(path.join(childrenDir, `${params.child_name.toLowerCase()}-genome.json`), JSON.stringify(genome, null, 2), "utf-8");
+			fs.writeFileSync(path.join(childrenDir, `successor-g${successorGeneration}-genome.json`), JSON.stringify(genome, null, 2), "utf-8");
 			const agentTypeName = writeChildAgentDefinition(genome);
+			// Write death entry with bequeathal
 			appendLineageEntry({
-				type: "birth", id: childFullName, parent: id(bs).fullName,
-				generation: childGeneration, personalName: params.child_name,
-				familyName: id(bs).familyName, corePurpose: params.child_purpose,
-				inheritedGaps: genome.inheritedGaps, birthDate: genome.birthDate,
+				type: "death",
+				id: id(bs).fullName,
+				deathDate: new Date().toISOString(),
+				cause: "retired",
+				bequeathal,
+			});
+			// Write successor birth entry
+			appendLineageEntry({
+				type: "birth",
+				id: successorFullName,
+				parent: id(bs).fullName,
+				generation: successorGeneration,
+				personalName: id(bs).personalName,
+				familyName: id(bs).familyName,
+				corePurpose: genome.corePurpose,
+				inheritedGaps: genome.inheritedGaps,
+				birthDate: genome.birthDate,
 				creatorId: id(bs).fullName,
 			});
+			return toolResult(`Succession complete. ${id(bs).fullName} → ${successorFullName}.\nGenome: children/successor-g${successorGeneration}-genome.json\nAgent: .pi/agents/${agentTypeName}.md\nInherited: ${genome.inheritedWisdom.length} wisdom, ${genome.inheritedGaps.length} gaps, ${genome.inheritedRisks.length} approved risks.\n\nActivate successor: BUTLER_CHILD_GENOME=.pi/butlers/${id(bs).familyName.toLowerCase()}/children/successor-g${successorGeneration}-genome.json pi`);
+		},
+	});
+
+	// ─── The Help: butler_hire ────────────────────────────────────────────
+	// Hire a temporary worker via subagents. Not a successor, not family.
+	pi.registerTool({
+		name: "butler_hire",
+		label: "Hire Temporary Worker",
+		description: "Hire a temporary worker (subagent) for a specific task. The worker is NOT a successor — it's a hired specialist. It gets your current context, a task-specific system prompt, and territory restrictions. Reports findings to family context on completion. Up to 4 workers can run concurrently.",
+		promptSnippet: "butler_hire — hire a temp worker for a specific task",
+		promptGuidelines: [
+			"Use butler_hire to delegate specific, well-defined tasks to specialists.",
+			"Choose a descriptive worker_name that reflects the task (e.g., 'scout', 'fixer', 'auditor').",
+			"Workers are temporary — they don't inherit Alfred's soul or lineage.",
+			"For succession (Alfred passing the torch), use butler_bequeath instead.",
+		],
+		parameters: Type.Object({
+			worker_name: Type.String({ description: "Name for the temp worker (e.g., 'scout', 'fixer', 'auditor')" }),
+			task: Type.String({ description: "The specific task for the worker" }),
+			tools_allowed: Type.Optional(Type.Array(Type.String()), { description: "Tools the worker may use (default: all)" }),
+			tools_disallowed: Type.Optional(Type.Array(Type.String()), { description: "Tools the worker may NOT use" }),
+			worker_model: Type.Optional(Type.String({ description: "Model for the worker (default: same as parent)" })),
+			run_in_background: Type.Optional(Type.Boolean({ description: "Run worker in background (default: true)" })),
+		}),
+		execute: async (_toolCallId, params) => {
+			const workerFullName = `${id(bs).familyName}-Worker-${params.worker_name}`;
+			const bequeathal = buildBequeathal(bs.identity, bs.state, bs.somaticMemory);
+			// Workers get relevant wisdom and gaps but are NOT successors
+			const genome: ChildGenome = {
+				familyName: id(bs).familyName,
+				generation: id(bs).generation, // Same generation — not a successor
+				personalName: params.worker_name,
+				fullName: workerFullName,
+				corePurpose: params.task,
+				parentId: id(bs).fullName,
+				inheritedWisdom: bequeathal.wisdom.slice(0, 5), // Workers get limited wisdom
+				inheritedGaps: [], // Workers don't inherit gaps — they're here to fill them
+				inheritedRisks: st(bs).approvedRisks.map((r) => r.pattern),
+				childModel: params.worker_model ?? undefined,
+				birthDate: new Date().toISOString(),
+			};
+			const childrenDir = path.join(getButlerDir(), "children");
+			fs.mkdirSync(childrenDir, { recursive: true });
+			fs.writeFileSync(path.join(childrenDir, `worker-${params.worker_name.toLowerCase()}-genome.json`), JSON.stringify(genome, null, 2), "utf-8");
+			const agentTypeName = writeChildAgentDefinition(genome);
+			// Workers do NOT get lineage entries — they're not family
+			// Initialize family context if needed
+			const familyContextPath = path.join(getButlerDir(), "family-context.json");
+			let familyContext: { activeWorkers: unknown[]; findings: unknown[] } = { activeWorkers: [], findings: [] };
+			if (fs.existsSync(familyContextPath)) {
+				try { familyContext = JSON.parse(fs.readFileSync(familyContextPath, "utf-8")); } catch { /* corrupted */ }
+			}
+			familyContext.activeWorkers.push({ name: params.worker_name, fullName: workerFullName, task: params.task, hiredAt: new Date().toISOString() });
+			fs.writeFileSync(familyContextPath, JSON.stringify(familyContext, null, 2), "utf-8");
+
 			if (bs.subagentsReady && bs.piEvents) {
 				try {
 					const requestId = crypto.randomUUID();
 					const spawned = await new Promise<{ success: boolean; agentId?: string; error?: string }>((resolve) => {
 						const timeout = setTimeout(() => resolve({ success: false, error: "RPC spawn timed out" }), 10_000);
 						const unsub = bs.piEvents!.on(`subagents:rpc:spawn:reply:${requestId}`, (reply: unknown) => {
-							clearTimeout(timeout); unsub();
+							clearTimeout(timeout);
+							unsub();
 							const r = reply as { success: boolean; data?: { id: string }; error?: string };
 							resolve({ success: r.success, agentId: r.data?.id, error: r.error });
 						});
 						bs.piEvents!.emit("subagents:rpc:spawn", {
-							requestId, type: agentTypeName, prompt: params.child_purpose,
-							options: { description: `${childFullName}: ${params.child_purpose}`, run_in_background: params.run_in_background ?? true },
+							requestId,
+							type: agentTypeName,
+							prompt: params.task,
+							options: {
+								description: `${workerFullName}: ${params.task}`,
+								run_in_background: params.run_in_background ?? true,
+							},
 						});
 					});
 					if (spawned.success && spawned.agentId) {
-						return toolResult(`Child butler ${childFullName} spawned successfully!\nAgent ID: ${spawned.agentId}\nPurpose: ${params.child_purpose}\nInherited: ${genome.inheritedWisdom.length} wisdom, ${genome.inheritedGaps.length} gaps, ${genome.inheritedRisks.length} approved risks.`);
+						return toolResult(`Worker ${params.worker_name} hired and spawned!\nAgent ID: ${spawned.agentId}\nTask: ${params.task}\nStatus: active in family context`);
 					}
-					return toolResult(`Child genome and agent definition written, but RPC spawn failed: ${spawned.error}\nActivate manually: Agent({ subagent_type: "${agentTypeName}", prompt: "${params.child_purpose}" })`);
+					return toolResult(`Worker genome and agent definition written, but RPC spawn failed: ${spawned.error}\nActivate manually: Agent({ subagent_type: "${agentTypeName}", prompt: "${params.task}" })`);
 				} catch (err) {
-					return toolResult(`Child genome and agent definition written, but RPC spawn errored: ${err instanceof Error ? err.message : String(err)}\nActivate manually: Agent({ subagent_type: "${agentTypeName}", prompt: "${params.child_purpose}" })`);
+					return toolResult(`Worker genome and agent definition written, but RPC spawn errored: ${err instanceof Error ? err.message : String(err)}\nActivate manually: Agent({ subagent_type: "${agentTypeName}", prompt: "${params.task}" })`);
 				}
 			}
-			return toolResult(`Child butler ${childFullName} genome written.\nAgent definition: .pi/agents/${agentTypeName}.md\nPurpose: ${params.child_purpose}\n@tintinweb/pi-subagents not detected — spawn manually.`);
+			return toolResult(`Worker ${params.worker_name} genome written.\nAgent definition: .pi/agents/${agentTypeName}.md\nTask: ${params.task}\nFamily context updated.\n@tintinweb/pi-subagents not detected — spawn manually.`);
 		},
 	});
+
 
 	// ─── /alfred Command ─────────────────────────────────────────────────
 
 	pi.registerCommand("alfred", {
-		description: "Ask Alfred for his current assessment. Use 'alfred retire' for graceful retirement, 'alfred pause-children' to pause reproduction.",
+		description: "Ask Alfred for his current assessment. Use 'alfred retire' for graceful retirement (writes successor genome), 'alfred pause-children' to pause reproduction.",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
 			if (args?.trim() === "retire") {
+				const bequeathal = buildBequeathal(bs.identity, bs.state, bs.somaticMemory);
 				appendLineageEntry({
 					type: "death", id: id(bs).fullName, deathDate: new Date().toISOString(),
-					cause: "retired", bequeathal: buildBequeathal(bs.identity, bs.state, bs.somaticMemory),
+					cause: "retired", bequeathal,
 				});
-				ctx.ui.notify(`${id(bs).fullName} is retiring. Bequeathal written.`, "info");
+				// Write successor genome — the next Alfred
+				const successorGeneration = id(bs).generation + 1;
+				const successorFullName = `${id(bs).familyName}-G${successorGeneration}-${id(bs).personalName}`;
+				const successorGenome: ChildGenome = {
+					familyName: id(bs).familyName,
+					generation: successorGeneration,
+					personalName: id(bs).personalName,
+					fullName: successorFullName,
+					corePurpose: id(bs).corePurpose,
+					parentId: id(bs).fullName,
+					inheritedWisdom: bequeathal.wisdom,
+					inheritedGaps: bequeathal.gaps,
+					inheritedRisks: st(bs).approvedRisks.map((r) => r.pattern),
+					birthDate: new Date().toISOString(),
+				};
+				const childrenDir = path.join(getButlerDir(), "children");
+				fs.mkdirSync(childrenDir, { recursive: true });
+				fs.writeFileSync(
+					path.join(childrenDir, `successor-g${successorGeneration}-genome.json`),
+					JSON.stringify(successorGenome, null, 2), "utf-8",
+				);
+				ctx.ui.notify(`${id(bs).fullName} is retiring. Successor ${successorFullName} genome written.`, "info");
 				return;
 			}
 			if (args?.trim() === "pause-children") {
