@@ -10,6 +10,8 @@ import type {
 	DetectedRisk,
 	DetectedGenome,
 	PiEvents,
+	IdentifiedGap,
+	GapSeverity,
 } from "./types.js";
 import {
 	DEFAULT_FAMILY_NAME,
@@ -23,6 +25,9 @@ import {
 	PAIN_DECAY_BETWEEN_SESSIONS,
 	DEFAULT_SOMATIC_MEMORY,
 	RISK_PATTERNS,
+	PAIN_PROMOTION_THRESHOLD,
+	GAP_SEVERITY_THRESHOLDS,
+	GAP_CATEGORY_MAP,
 } from "./constants.js";
 
 // ─── Tool Result Helper ──────────────────────────────────────────────────
@@ -135,6 +140,7 @@ export function createDefaultState(): SomaticState {
 		approvedRisks: [],
 		painPatterns: [],
 		satisfactionPatterns: [],
+		identifiedGaps: [],
 	};
 }
 
@@ -144,6 +150,8 @@ export function loadOrCreateState(): SomaticState {
 		return createDefaultState();
 	}
 	const state = JSON.parse(fs.readFileSync(statePath, "utf-8")) as SomaticState;
+	// Backward-compat: ensure fields added after initial release exist
+	if (!state.identifiedGaps) state.identifiedGaps = [];
 	const hoursSince = (Date.now() - fs.statSync(statePath).mtime.getTime()) / (1000 * 60 * 60);
 	if (hoursSince >= 24) {
 		state.fatigueLevel = 0;
@@ -213,7 +221,11 @@ export function buildBequeathal(
 		.map((m) => m.replace(/^- /, ""))
 		.filter((w) => !w.includes("(none recorded") && !w.includes("not yet discovered") && !w.includes("(none identified"))
 		.slice(0, 10);
-	const gaps = state.painPatterns.filter((p) => p.occurrenceCount >= 3).map((p) => p.pattern);
+	// Use first-class IdentifiedGap objects (not raw painPatterns)
+	const gaps = state.identifiedGaps.map((g) => `${g.id}: ${g.description}`);
+	// Also include unpromoted high-frequency pain patterns as fallback
+	const untrackedPain = state.painPatterns.filter((p) => p.occurrenceCount >= 3 && !p.promotedToLesson).map((p) => p.pattern);
+	gaps.push(...untrackedPain);
 	const approvedRisks = state.approvedRisks.map((r) => r.pattern);
 	const failedApproaches = state.painPatterns
 		.filter((p) => p.occurrenceCount >= 2 && p.decayedSeverity > 10)
@@ -318,6 +330,133 @@ export function addToSomaticSection(content: string, sectionKey: keyof typeof SO
 	return `${content}\n\n${sectionHeader}\n- ${entry}`;
 }
 
+// ─── Pain Promotion ─────────────────────────────────────────────────────
+
+/**
+ * Check pain patterns for promotion to permanent somatic memory.
+ * When a pattern hits PAIN_PROMOTION_THRESHOLD occurrences, it's promoted
+ * to the Permanent Lessons section of somatic memory (non-decaying).
+ * Returns true if any pattern was promoted this turn.
+ */
+export function promotePainToLessons(state: SomaticState, somaticMemory: string): {
+	updatedMemory: string;
+	promoted: string[];
+} {
+	const promoted: string[] = [];
+	let memory = somaticMemory;
+
+	for (const pattern of state.painPatterns) {
+		if (pattern.occurrenceCount >= PAIN_PROMOTION_THRESHOLD && !pattern.promotedToLesson) {
+			// Create a human-readable lesson from the pattern
+			const lesson = patternToLesson(pattern.pattern);
+			// Only add if not already in somatic memory (avoid duplicates)
+			if (!memory.includes(lesson)) {
+				memory = addToSomaticSection(memory, "permanentLessons", lesson);
+				promoted.push(lesson);
+			}
+			pattern.promotedToLesson = true;
+		}
+	}
+
+	return { updatedMemory: memory, promoted };
+}
+
+/** Convert a pain pattern ID like "tool:bash" or "tool:bash:docker-permission" into a readable lesson. */
+function patternToLesson(patternId: string): string {
+	// Strip "tool:" prefix if present
+	const clean = patternId.replace(/^tool:/, "");
+	// Convert colon-separated segments into context: "bash:docker-permission" → "docker permission in bash"
+	const parts = clean.split(":");
+	let description: string;
+	if (parts.length >= 2) {
+		// Last part is the specific issue, first part is the tool
+		const tool = parts[0];
+		const issue = parts.slice(1).join(" ").replace(/[-_]/g, " ");
+		description = `${issue} in ${tool}`;
+	} else {
+		description = clean.replace(/[-_]/g, " ");
+	}
+	// Capitalize first letter
+	const capitalized = description.charAt(0).toUpperCase() + description.slice(1);
+	return `${capitalized} has failed repeatedly — verify before executing`;
+}
+
+// ─── Identified Gaps ─────────────────────────────────────────────────────
+
+/** Determine gap severity based on occurrence count. */
+export function classifyGapSeverity(occurrenceCount: number): GapSeverity {
+	if (occurrenceCount >= GAP_SEVERITY_THRESHOLDS.critical) return "critical";
+	if (occurrenceCount >= GAP_SEVERITY_THRESHOLDS.important) return "important";
+	return "nice-to-have";
+}
+
+/** Infer a gap category from the pain pattern string. */
+export function inferGapCategory(pattern: string): string {
+	for (const [prefix, category] of Object.entries(GAP_CATEGORY_MAP)) {
+		if (pattern.includes(prefix)) return category;
+	}
+	return "other";
+}
+
+/** Infer what kind of specialist could fill this gap. */
+export function inferSuggestedSuccessor(pattern: string, category: string): string {
+	const suffix = category === "infrastructure" ? "infrastructure specialist" :
+		category === "integration" ? "integration specialist" :
+			category === "domain-knowledge" ? "domain expert" :
+				category === "tooling" ? "tooling specialist" : "specialist";
+	return `A ${suffix} for ${pattern.replace(/^tool:/, "")}`;
+}
+
+/**
+ * Update identified gaps from pain patterns.
+ * - Creates new gaps when a pain pattern hits the promotion threshold
+ * - Increments existing gaps when the same pain pattern recurs
+ * - Escalates severity based on occurrence count
+ * Returns updated gaps array.
+ */
+export function updateGapsFromPain(state: SomaticState): IdentifiedGap[] {
+	const gaps = [...state.identifiedGaps];
+	const now = new Date().toISOString();
+
+	for (const pattern of state.painPatterns) {
+		if (pattern.occurrenceCount < PAIN_PROMOTION_THRESHOLD) continue;
+
+		const gapId = `gap:${pattern.pattern}`;
+		const existing = gaps.find((g) => g.id === gapId);
+
+		if (existing) {
+			// Update existing gap
+			existing.occurrenceCount = pattern.occurrenceCount;
+			existing.lastOccurrence = pattern.lastOccurrence;
+			existing.severity = classifyGapSeverity(pattern.occurrenceCount);
+		} else {
+			// Create new gap
+			const category = inferGapCategory(pattern.pattern);
+			gaps.push({
+				id: gapId,
+				description: patternToLesson(pattern.pattern).replace(" has failed repeatedly — verify before executing", ""),
+				category,
+				severity: classifyGapSeverity(pattern.occurrenceCount),
+				firstIdentified: pattern.lastOccurrence,
+				occurrenceCount: pattern.occurrenceCount,
+				lastOccurrence: pattern.lastOccurrence,
+				attemptedWorkarounds: [],
+				suggestedSuccessor: inferSuggestedSuccessor(pattern.pattern, category),
+			});
+		}
+	}
+
+	return gaps;
+}
+
+/** Build a readable summary of identified gaps for the somatic memory file. */
+export function formatGapsForMemory(gaps: IdentifiedGap[]): string[] {
+	return gaps.map((g) => {
+		const sev = g.severity === "critical" ? "⚠️" : g.severity === "important" ? "⚡" : "📌";
+		return `${sev} ${g.description} (${g.severity}, ${g.occurrenceCount}x)`;
+	});
+}
+
 // ─── Display Helpers ──────────────────────────────────────────────────────
 
 export function renderBar(label: string, value: number, max = 100): string {
@@ -369,6 +508,13 @@ export function buildButlerStateBlock(
 		const topPain = [...state.painPatterns].sort((a, b) => b.decayedSeverity - a.decayedSeverity).slice(0, 3);
 		lines.push("", "═══ RECENT PAIN ═══");
 		for (const p of topPain) lines.push(`- ${p.pattern} (severity ${p.decayedSeverity}, ${p.occurrenceCount}x, last ${timeSince(p.lastOccurrence)})`);
+	}
+	if (state.identifiedGaps.length > 0) {
+		lines.push("", "═══ IDENTIFIED GAPS ═══");
+		for (const g of state.identifiedGaps) {
+			const sev = g.severity === "critical" ? "⚠️" : g.severity === "important" ? "⚡" : "📌";
+			lines.push(`- ${sev} ${g.description} [${g.severity}] (${g.occurrenceCount}x)`);
+		}
 	}
 	lines.push("═══ END BUTLER STATE ═══");
 	return lines.join("\n");

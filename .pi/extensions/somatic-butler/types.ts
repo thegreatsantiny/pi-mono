@@ -23,6 +23,7 @@ export interface SomaticState {
 	approvedRisks: ApprovedRiskPattern[];
 	painPatterns: PainPattern[];
 	satisfactionPatterns: SatisfactionPattern[];
+	identifiedGaps: IdentifiedGap[];
 	_overflowDeathWritten?: boolean;
 }
 
@@ -38,6 +39,33 @@ export interface PainPattern {
 	occurrenceCount: number;
 	lastOccurrence: string;
 	decayedSeverity: number;
+	/** True once this pattern has been promoted to permanent somatic memory. */
+	promotedToLesson?: boolean;
+}
+
+// ─── Identified Gaps ────────────────────────────────────────────────────
+
+export type GapSeverity = "nice-to-have" | "important" | "critical";
+
+export interface IdentifiedGap {
+	/** Unique ID, e.g. "gap:bash:docker-permission" */
+	id: string;
+	/** Human-readable description of what Alfred cannot do. */
+	description: string;
+	/** Broad category: infrastructure, integration, domain-knowledge, tooling, other. */
+	category: string;
+	/** How badly Alfred needs to fill this gap. */
+	severity: GapSeverity;
+	/** ISO timestamp when first identified. */
+	firstIdentified: string;
+	/** How many times this gap was hit. */
+	occurrenceCount: number;
+	/** ISO timestamp of most recent hit. */
+	lastOccurrence: string;
+	/** What was tried to work around this gap. */
+	attemptedWorkarounds: string[];
+	/** What kind of specialist/temp worker could fill this gap. */
+	suggestedSuccessor: string;
 }
 
 export interface SatisfactionPattern {

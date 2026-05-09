@@ -31,6 +31,7 @@ import {
 	NEGATIVE_FEEDBACK,
 	DEFAULT_SOMATIC_MEMORY,
 	SOMATIC_SECTIONS,
+	PAIN_PROMOTION_THRESHOLD,
 } from "./somatic-butler/constants.js";
 import { createButlerState, id, st, type ButlerState } from "./somatic-butler/state.js";
 import {
@@ -53,6 +54,9 @@ import {
 	detectChildGenome,
 	addToSomaticSection,
 	buildButlerStateBlock,
+	promotePainToLessons,
+	updateGapsFromPain,
+	formatGapsForMemory,
 } from "./somatic-butler/utils.js";
 
 // ─── Internal Helpers ────────────────────────────────────────────────────
@@ -166,6 +170,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 					approvedRisks: latest.approvedRisks ?? st(bs).approvedRisks,
 					painPatterns: latest.painPatterns ?? st(bs).painPatterns,
 					satisfactionPatterns: latest.satisfactionPatterns ?? st(bs).satisfactionPatterns,
+					identifiedGaps: latest.identifiedGaps ?? st(bs).identifiedGaps,
 				});
 			}
 		} catch { /* getEntries may not be available */ }
@@ -227,6 +232,25 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 	pi.on("turn_end", async (_event, ctx) => {
 		applyPerTurnDecay(bs.state);
+
+		// Promote recurring pain to permanent lessons + update identified gaps
+		const { updatedMemory, promoted } = promotePainToLessons(bs.state, bs.somaticMemory);
+		if (promoted.length > 0) {
+			bs.somaticMemory = updatedMemory;
+			writeSomaticMemory(bs);
+		}
+		const newGaps = updateGapsFromPain(bs.state);
+		if (newGaps.length !== st(bs).identifiedGaps.length || newGaps.some((g, i) => g.occurrenceCount !== st(bs).identifiedGaps[i]?.occurrenceCount)) {
+			st(bs).identifiedGaps = newGaps;
+			// Sync identified gaps to somatic memory file
+			for (const gapLine of formatGapsForMemory(newGaps)) {
+				const desc = gapLine.replace(/^[^ ]+ /, ""); // strip emoji prefix
+				if (!bs.somaticMemory.includes(desc)) {
+					bs.somaticMemory = addToSomaticSection(bs.somaticMemory, "identifiedGaps", gapLine);
+				}
+			}
+			writeSomaticMemory(bs);
+		}
 		try {
 			(pi as unknown as { appendEntry: (type: string, data: unknown) => void }).appendEntry(STATE_ENTRY_TYPE, { ...bs.state });
 		} catch { /* appendEntry may not be available */ }
@@ -359,6 +383,21 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 					bs.somaticMemory = lines.join("\n");
 				}
 				writeSomaticMemory(bs);
+				// When adding to Identified Gaps, also create a structured IdentifiedGap in state
+				if (knownSection?.[0] === "identifiedGaps" && params.content) {
+					const gapId = `gap:manual:${Date.now()}`;
+					st(bs).identifiedGaps.push({
+						id: gapId,
+						description: params.content.replace(/^[📌⚡⚠️]\s*/, ""),
+						category: "other",
+						severity: "nice-to-have",
+						firstIdentified: new Date().toISOString(),
+						occurrenceCount: 1,
+						lastOccurrence: new Date().toISOString(),
+						attemptedWorkarounds: [],
+						suggestedSuccessor: "A specialist for this task",
+					});
+				}
 				return toolResult(`Added to ${params.section} in ${targetName}. Size: ${bs.somaticMemory.length}/${capacity} chars.`);
 			}
 			if (params.action === "replace") {
@@ -392,13 +431,20 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			"Recommend rest (compaction) when fatigue is high or context is running low.",
 		],
 		parameters: Type.Object({
-			action: Type.Union([Type.Literal("state"), Type.Literal("gaps"), Type.Literal("lineage"), Type.Literal("recommend_rest")], { description: "What to assess" }),
+			action: Type.Union([Type.Literal("state"), Type.Literal("gaps"), Type.Literal("lineage"), Type.Literal("recommend_rest"), Type.Literal("add_workaround")], { description: "What to assess" }),
+			gap_id: Type.Optional(Type.String({ description: "For add_workaround: the gap ID to add a workaround to" })),
+			workaround: Type.Optional(Type.String({ description: "For add_workaround: the workaround description" })),
 		}),
 		execute: async (_toolCallId, params) => {
 			if (params.action === "state") return toolResult(`${id(bs).fullName} — Somatic State:\n${buildButlerStateBlock(bs.identity, bs.state, bs.heartbeat)}`);
 			if (params.action === "gaps") {
-				const gaps = st(bs).painPatterns.filter((p) => p.occurrenceCount >= 3).map((p) => `- ${p.pattern} (${p.occurrenceCount} failures, severity ${p.decayedSeverity})`);
-				return gaps.length === 0 ? toolResult("No significant gaps identified yet.") : toolResult(`Identified Gaps:\n${gaps.join("\n")}`);
+				if (st(bs).identifiedGaps.length === 0) return toolResult("No significant gaps identified yet.");
+				const gapLines = st(bs).identifiedGaps.map((g) => {
+					const sev = g.severity === "critical" ? "⚠️" : g.severity === "important" ? "⚡" : "📌";
+					const workarounds = g.attemptedWorkarounds.length > 0 ? ` | Tried: ${g.attemptedWorkarounds.join(", ")}` : "";
+					return `${sev} ${g.description} [${g.severity}] (${g.occurrenceCount}x) — ${g.suggestedSuccessor}${workarounds}`;
+				});
+				return toolResult(`Identified Gaps:\n${gapLines.join("\n")}`);
 			}
 			if (params.action === "lineage") {
 				const { readLineage } = await import("./somatic-butler/utils.js");
@@ -422,7 +468,14 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				if (st(bs).fatigueLevel > 50) return toolResult(`I'm moderately fatigued (fatigue: ${st(bs).fatigueLevel}/100). I can continue but will suggest a nap if it rises.`);
 				return toolResult(`I'm feeling alert (fatigue: ${st(bs).fatigueLevel}/100). No rest needed.`);
 			}
-			return toolResult(`Unknown assessment action: ${params.action}`, true);
+			if (params.action === "add_workaround") {
+			if (!params.gap_id || !params.workaround) return toolResult("Error: 'add_workaround' requires both 'gap_id' and 'workaround' parameters.", true);
+			const gap = st(bs).identifiedGaps.find((g) => g.id === params.gap_id);
+			if (!gap) return toolResult(`Error: No gap found with ID '${params.gap_id}'. Use 'gaps' action to list available gaps.`, true);
+			gap.attemptedWorkarounds.push(params.workaround);
+			return toolResult(`Added workaround to gap '${gap.id}': ${params.workaround}\nTotal workarounds: ${gap.attemptedWorkarounds.length}`);
+		}
+		return toolResult(`Unknown assessment action: ${params.action}`, true);
 		},
 	});
 

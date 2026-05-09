@@ -14,6 +14,16 @@ export const SATISFACTION_DECAY_PER_TURN = 0.95;
 export const FATIGUE_DECAY_BETWEEN_SESSIONS = 30;
 export const PAIN_DECAY_BETWEEN_SESSIONS = 0.5;
 
+// Pain promotion — when a painPattern hits this count, it becomes a permanent lesson
+export const PAIN_PROMOTION_THRESHOLD = 3;
+
+// Gap severity escalation — occurrence thresholds for bumping gap severity
+export const GAP_SEVERITY_THRESHOLDS = {
+  niceToHave: 3,   // 3+ hits → nice-to-have
+  important: 5,    // 5+ hits → important
+  critical: 8,     // 8+ hits → critical
+} as const;
+
 // In-session tracking
 export const STATE_ENTRY_TYPE = "butler-state";
 
@@ -45,6 +55,18 @@ export const SOMATIC_SECTIONS = {
 	approvedRisks: "## Approved Risks (human confirmed these are acceptable)",
 	identifiedGaps: "## Identified Gaps (what you cannot do)",
 } as const;
+
+// Gap category mapping from tool-name prefixes
+export const GAP_CATEGORY_MAP: Record<string, string> = {
+	"tool:bash": "tooling",
+	"tool:edit": "tooling",
+	"tool:write": "tooling",
+	"tool:read": "tooling",
+	"docker": "infrastructure",
+	"deploy": "infrastructure",
+	"telegram": "integration",
+	"mcp": "integration",
+};
 
 // Human feedback regex patterns
 export const POSITIVE_FEEDBACK = /\b(good job|great|perfect|well done|nice|excellent|thanks|thank you|spot on|nailed it|that's right|correct|exactly)\b/i;
