@@ -433,7 +433,25 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			const memUsage = `${bs.somaticMemory.length}/${SOMATIC_MEMORY_CAPACITY}${memOver ? " OVER CAPACITY — consolidate now" : ""}`;
 			memoryBlock += `\n\n═══ SOMATIC MEMORY (${memUsage} chars) ═══\n${bs.somaticMemory.trim()}\n═══ END SOMATIC MEMORY ═══`;
 		}
-		return { systemPrompt: event.systemPrompt + "\n\n" + stateBlock + memoryBlock };
+				// Delegation advisory — suggest hiring when critical gaps or high urgency
+		let delegationBlock = "";
+		const criticalGaps = st(bs).identifiedGaps.filter((g) => g.severity === "critical");
+		const importantGaps = st(bs).identifiedGaps.filter((g) => g.severity === "important");
+		if (criticalGaps.length > 0 || (importantGaps.length > 0 && st(bs).urgencyLevel > 60)) {
+			delegationBlock = "\n\n═══ DELEGATION ADVISORY ═══\n";
+			if (criticalGaps.length > 0) {
+				delegationBlock += "⚠️ You have critical gaps that a specialist could fill:\n";
+				for (const g of criticalGaps) delegationBlock += `- ${g.description} — ${g.suggestedSuccessor}\n`;
+				delegationBlock += "Consider using butler_hire to delegate.\n";
+			}
+			if (importantGaps.length > 0 && st(bs).urgencyLevel > 60) {
+				delegationBlock += "⚡ Context is getting crowded and you have important gaps:\n";
+				for (const g of importantGaps) delegationBlock += `- ${g.description} — ${g.suggestedSuccessor}\n`;
+				delegationBlock += "Delegating now could prevent context overflow.\n";
+			}
+			delegationBlock += "═══ END DELEGATION ADVISORY ═══";
+		}
+		return { systemPrompt: event.systemPrompt + "\n\n" + stateBlock + memoryBlock + delegationBlock };
 	});
 
 	// ─── Custom Tools ───────────────────────────────────────────────────
