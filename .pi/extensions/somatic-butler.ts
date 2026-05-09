@@ -32,7 +32,7 @@ import {
 	DEFAULT_SOMATIC_MEMORY,
 	SOMATIC_SECTIONS,
 } from "./somatic-butler/constants.js";
-import { createButlerState, type ButlerState } from "./somatic-butler/state.js";
+import { createButlerState, id, st, type ButlerState } from "./somatic-butler/state.js";
 import {
 	toolResult,
 	getPiEvents,
@@ -40,7 +40,6 @@ import {
 	getButlerDir,
 	getSomaticMemoryPath,
 	loadOrCreateFile,
-	persistSomaticMemory,
 	loadOrCreateIdentity,
 	createDefaultState,
 	loadOrCreateState,
@@ -55,6 +54,21 @@ import {
 	addToSomaticSection,
 	buildButlerStateBlock,
 } from "./somatic-butler/utils.js";
+
+// ─── Internal Helpers ────────────────────────────────────────────────────
+
+/** Resolve the correct somatic memory path for the current butler identity. */
+function resolveSomaticMemoryPath(bs: ButlerState): string {
+	if (id(bs).generation > 0) {
+		return path.join(getBaseDir(), ".pi", "butlers", id(bs).personalName.toLowerCase(), "somatic-memory.md");
+	}
+	return getSomaticMemoryPath();
+}
+
+/** Persist somatic memory to the correct butler directory. */
+function writeSomaticMemory(bs: ButlerState): void {
+	fs.writeFileSync(resolveSomaticMemoryPath(bs), bs.somaticMemory, "utf-8");
+}
 
 // ─── Extension ───────────────────────────────────────────────────────────
 
@@ -111,20 +125,20 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				: createDefaultState();
 			if (!fs.existsSync(childStatePath)) {
 				for (const pattern of genome.inheritedRisks) {
-					bs.state.approvedRisks.push({ pattern, approvedAt: new Date().toISOString(), suppressWarnings: true });
+					st(bs).approvedRisks.push({ pattern, approvedAt: new Date().toISOString(), suppressWarnings: true });
 				}
 			}
 			bs.somaticMemory = loadOrCreateFile(
 				path.join(childButlerDir, "somatic-memory.md"),
 				DEFAULT_SOMATIC_MEMORY.replace("Pennyworth-G0-Alfred", genome.fullName),
 			);
-			ctx.ui.notify(`${bs.identity.fullName} (child of ${genome.parentId}) is waking up.`, "info");
-			if (!hasBirthEntry(bs.identity.fullName)) {
+			ctx.ui.notify(`${id(bs).fullName} (child of ${genome.parentId}) is waking up.`, "info");
+			if (!hasBirthEntry(id(bs).fullName)) {
 				appendLineageEntry({
-					type: "birth", id: bs.identity.fullName, parent: genome.parentId,
-					generation: bs.identity.generation, personalName: bs.identity.personalName,
-					familyName: bs.identity.familyName, corePurpose: bs.identity.corePurpose,
-					inheritedGaps: genome.inheritedGaps, birthDate: bs.identity.birthDate,
+					type: "birth", id: id(bs).fullName, parent: genome.parentId,
+					generation: id(bs).generation, personalName: id(bs).personalName,
+					familyName: id(bs).familyName, corePurpose: id(bs).corePurpose,
+					inheritedGaps: genome.inheritedGaps, birthDate: id(bs).birthDate,
 					creatorId: genome.parentId,
 				});
 			}
@@ -144,26 +158,26 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			if (stateEntries.length > 0) {
 				const latest = stateEntries[stateEntries.length - 1] as SomaticState;
 				Object.assign(bs.state, {
-					painLevel: latest.painLevel ?? bs.state.painLevel,
-					satisfactionLevel: latest.satisfactionLevel ?? bs.state.satisfactionLevel,
-					fatigueLevel: latest.fatigueLevel ?? bs.state.fatigueLevel,
-					urgencyLevel: latest.urgencyLevel ?? bs.state.urgencyLevel,
-					curiosityLevel: latest.curiosityLevel ?? bs.state.curiosityLevel,
-					approvedRisks: latest.approvedRisks ?? bs.state.approvedRisks,
-					painPatterns: latest.painPatterns ?? bs.state.painPatterns,
-					satisfactionPatterns: latest.satisfactionPatterns ?? bs.state.satisfactionPatterns,
+					painLevel: latest.painLevel ?? st(bs).painLevel,
+					satisfactionLevel: latest.satisfactionLevel ?? st(bs).satisfactionLevel,
+					fatigueLevel: latest.fatigueLevel ?? st(bs).fatigueLevel,
+					urgencyLevel: latest.urgencyLevel ?? st(bs).urgencyLevel,
+					curiosityLevel: latest.curiosityLevel ?? st(bs).curiosityLevel,
+					approvedRisks: latest.approvedRisks ?? st(bs).approvedRisks,
+					painPatterns: latest.painPatterns ?? st(bs).painPatterns,
+					satisfactionPatterns: latest.satisfactionPatterns ?? st(bs).satisfactionPatterns,
 				});
 			}
 		} catch { /* getEntries may not be available */ }
 
-		ctx.ui.notify(`${bs.identity.fullName} is waking up.`, "info");
+		ctx.ui.notify(`${id(bs).fullName} is waking up.`, "info");
 
-		if (!hasBirthEntry(bs.identity.fullName)) {
+		if (!hasBirthEntry(id(bs).fullName)) {
 			appendLineageEntry({
-				type: "birth", id: bs.identity.fullName, parent: null,
-				generation: bs.identity.generation, personalName: bs.identity.personalName,
-				familyName: bs.identity.familyName, corePurpose: bs.identity.corePurpose,
-				birthDate: bs.identity.birthDate, creatorId: bs.identity.creatorId,
+				type: "birth", id: id(bs).fullName, parent: null,
+				generation: id(bs).generation, personalName: id(bs).personalName,
+				familyName: id(bs).familyName, corePurpose: id(bs).corePurpose,
+				birthDate: id(bs).birthDate, creatorId: id(bs).creatorId,
 			});
 		}
 
@@ -173,25 +187,25 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
-		const butlerDir = bs.identity.generation > 0
-			? path.join(getBaseDir(), ".pi", "butlers", bs.identity.personalName.toLowerCase())
+		const butlerDir = id(bs).generation > 0
+			? path.join(getBaseDir(), ".pi", "butlers", id(bs).personalName.toLowerCase())
 			: getButlerDir();
 		if (butlerDir !== getButlerDir()) fs.mkdirSync(butlerDir, { recursive: true });
 		fs.writeFileSync(path.join(butlerDir, "identity.json"), JSON.stringify(bs.identity, null, 2), "utf-8");
 		fs.writeFileSync(path.join(butlerDir, "state.json"), JSON.stringify(bs.state, null, 2), "utf-8");
-		persistSomaticMemory(bs.somaticMemory);
+		writeSomaticMemory(bs);
 		// Regular shutdown = sleep, not death. Death only on retirement or context overflow.
-		console.log(`[somatic-butler] ${bs.identity.fullName} is going to sleep.`);
+		console.log(`[somatic-butler] ${id(bs).fullName} is going to sleep.`);
 	});
 
 	// ─── Turn Lifecycle ─────────────────────────────────────────────────
 
 	pi.on("turn_start", async (_event, ctx) => {
-		bs.state.turnsThisSession++;
+		st(bs).turnsThisSession++;
 		try {
 			const usage = ctx.getContextUsage();
 			if (usage && typeof usage.percent === "number") {
-				bs.state.urgencyLevel = Math.round(Math.min(100, usage.percent));
+				st(bs).urgencyLevel = Math.round(Math.min(100, usage.percent));
 			}
 		} catch { /* getContextUsage may return null after compaction */ }
 	});
@@ -201,12 +215,12 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		updateHeartbeat(bs, toolName);
 		if (bs.piEvents) bs.piEvents.emit("butler:heartbeat", { phase: bs.heartbeat.currentPhase, turn: bs.heartbeat.turnIndex });
 		if (event.isError) {
-			bs.state.painLevel = Math.min(100, bs.state.painLevel + 20);
-			bs.state.errorsThisSession++;
+			st(bs).painLevel = Math.min(100, st(bs).painLevel + 20);
+			st(bs).errorsThisSession++;
 			updatePainPattern(bs, toolName, true);
 		} else {
-			bs.state.satisfactionLevel = Math.min(100, bs.state.satisfactionLevel + 10);
-			bs.state.successesThisSession++;
+			st(bs).satisfactionLevel = Math.min(100, st(bs).satisfactionLevel + 10);
+			st(bs).successesThisSession++;
 			updateSatisfactionPattern(bs, toolName);
 		}
 	});
@@ -216,12 +230,12 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		try {
 			(pi as unknown as { appendEntry: (type: string, data: unknown) => void }).appendEntry(STATE_ENTRY_TYPE, { ...bs.state });
 		} catch { /* appendEntry may not be available */ }
-		if (bs.state.urgencyLevel >= 90 && !bs.state._overflowDeathWritten) {
+		if (st(bs).urgencyLevel >= 90 && !st(bs)._overflowDeathWritten) {
 			appendLineageEntry({
-				type: "death", id: bs.identity.fullName, deathDate: new Date().toISOString(),
+				type: "death", id: id(bs).fullName, deathDate: new Date().toISOString(),
 				cause: "context-overflow", bequeathal: buildBequeathal(bs.identity, bs.state, bs.somaticMemory),
 			});
-			bs.state._overflowDeathWritten = true;
+			st(bs)._overflowDeathWritten = true;
 		}
 		if (ctx?.hasUI) ctx.ui.setWidget("butler-status", [formatWidget(bs)]);
 	});
@@ -232,7 +246,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		const input = (event as { input?: Record<string, unknown> }).input ?? {};
 		const risk = detectRisk(input);
 		if (!risk) return;
-		const approved = bs.state.approvedRisks.find((r) => r.pattern === risk.pattern);
+		const approved = st(bs).approvedRisks.find((r) => r.pattern === risk.pattern);
 		if (approved?.suppressWarnings) return;
 		if (!ctx.hasUI) return { block: true, reason: `I cannot proceed: ${risk.description}. This requires human confirmation.` };
 		const confirmed = await ctx.ui.confirm(
@@ -240,9 +254,9 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			`${risk.description}.\n\nI can proceed, but I want you to be aware of the consequences.\n\nType 'Yes' to proceed, or 'Ignore consequences' to suppress future warnings.`,
 			{ yes: "Yes, proceed", no: "Cancel", alternate: "Ignore consequences" },
 		);
-		if (confirmed === true) { bs.state.satisfactionLevel = Math.min(100, bs.state.satisfactionLevel + 5); return; }
+		if (confirmed === true) { st(bs).satisfactionLevel = Math.min(100, st(bs).satisfactionLevel + 5); return; }
 		if (confirmed === "alternate") {
-			bs.state.approvedRisks.push({ pattern: risk.pattern, approvedAt: new Date().toISOString(), suppressWarnings: true });
+			st(bs).approvedRisks.push({ pattern: risk.pattern, approvedAt: new Date().toISOString(), suppressWarnings: true });
 			return;
 		}
 		return { block: true, reason: `Blocked: ${risk.description}. Human chose to cancel.` };
@@ -254,13 +268,13 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		const text = event.text;
 		if (!text || text.length < 3) return;
 		if (POSITIVE_FEEDBACK.test(text)) {
-			bs.state.satisfactionLevel = Math.min(100, bs.state.satisfactionLevel + 25);
+			st(bs).satisfactionLevel = Math.min(100, st(bs).satisfactionLevel + 25);
 			if (!bs.somaticMemory.includes("User gave positive feedback")) {
 				bs.somaticMemory = addToSomaticSection(bs.somaticMemory, "permanentLessons", "User gives direct positive feedback when satisfied");
 			}
 		}
 		if (NEGATIVE_FEEDBACK.test(text)) {
-			bs.state.painLevel = Math.min(100, bs.state.painLevel + 15);
+			st(bs).painLevel = Math.min(100, st(bs).painLevel + 15);
 			const lessonText = text.slice(0, 80).replace(/\n/g, " ");
 			const lessonLine = `Human correction: "${lessonText}"`;
 			if (!bs.somaticMemory.includes(lessonLine)) {
@@ -284,7 +298,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			const riskMatches = event.systemPrompt.match(/^- (.+:\S+)$/gm) ?? [];
 			for (const rm of riskMatches) {
 				const pattern = rm.replace(/^- /, "");
-				if (pattern.includes(":")) bs.state.approvedRisks.push({ pattern, approvedAt: new Date().toISOString(), suppressWarnings: true });
+				if (pattern.includes(":")) st(bs).approvedRisks.push({ pattern, approvedAt: new Date().toISOString(), suppressWarnings: true });
 			}
 			const childButlerDir = path.join(getBaseDir(), ".pi", "butlers", genome.personalName.toLowerCase());
 			const childMemoryPath = path.join(childButlerDir, "somatic-memory.md");
@@ -326,30 +340,39 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			if (params.action === "add") {
 				if (!params.section || !params.content) return toolResult("Error: 'add' requires both 'section' and 'content' parameters.", true);
 				if (targetContent.length + params.content.length > capacity * 1.5) return toolResult(`Error: ${targetName} is too full (${targetContent.length}/${capacity} chars). Consolidate first.`, true);
-				const sectionHeader = `## ${params.section}`;
-				const lines = targetContent.split("\n");
-				const sectionIdx = lines.findIndex((l) => l.trim() === sectionHeader);
-				if (sectionIdx >= 0) {
-					lines.splice(sectionIdx + 1, 0, `- ${params.content}`);
+				// Use addToSomaticSection for known sections (handles placeholder replacement)
+				const knownSection = (Object.entries(SOMATIC_SECTIONS) as [string, string][]).find(
+					([, header]) => header.startsWith(`## ${params.section}`),
+				);
+				if (knownSection) {
+					bs.somaticMemory = addToSomaticSection(bs.somaticMemory, knownSection[0] as keyof typeof SOMATIC_SECTIONS, params.content);
 				} else {
-					lines.push(`\n${sectionHeader}\n- ${params.content}`);
+					// Custom section — raw insert
+					const sectionHeader = `## ${params.section}`;
+					const lines = targetContent.split("\n");
+					const sectionIdx = lines.findIndex((l) => l.trim() === sectionHeader);
+					if (sectionIdx >= 0) {
+						lines.splice(sectionIdx + 1, 0, `- ${params.content}`);
+					} else {
+						lines.push(`\n${sectionHeader}\n- ${params.content}`);
+					}
+					bs.somaticMemory = lines.join("\n");
 				}
-				bs.somaticMemory = lines.join("\n");
-				persistSomaticMemory(bs.somaticMemory);
+				writeSomaticMemory(bs);
 				return toolResult(`Added to ${params.section} in ${targetName}. Size: ${bs.somaticMemory.length}/${capacity} chars.`);
 			}
 			if (params.action === "replace") {
 				if (!params.old_text || !params.content) return toolResult("Error: 'replace' requires both 'old_text' and 'content' parameters.", true);
 				if (!targetContent.includes(params.old_text)) return toolResult(`Error: Could not find specified text in ${targetName}.`, true);
 				bs.somaticMemory = targetContent.replace(params.old_text, params.content);
-				persistSomaticMemory(bs.somaticMemory);
+				writeSomaticMemory(bs);
 				return toolResult(`Replaced in ${targetName}. Size: ${bs.somaticMemory.length}/${capacity} chars.`);
 			}
 			if (params.action === "remove") {
 				if (!params.old_text) return toolResult("Error: 'remove' requires 'old_text' parameter.", true);
 				if (!targetContent.includes(params.old_text)) return toolResult(`Error: Could not find specified text in ${targetName}.`, true);
 				bs.somaticMemory = targetContent.replace(params.old_text, "").replace(/\n{3,}/g, "\n\n");
-				persistSomaticMemory(bs.somaticMemory);
+				writeSomaticMemory(bs);
 				return toolResult(`Removed from ${targetName}. Size: ${bs.somaticMemory.length}/${capacity} chars.`);
 			}
 			if (params.action === "consolidate") {
@@ -372,9 +395,9 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			action: Type.Union([Type.Literal("state"), Type.Literal("gaps"), Type.Literal("lineage"), Type.Literal("recommend_rest")], { description: "What to assess" }),
 		}),
 		execute: async (_toolCallId, params) => {
-			if (params.action === "state") return toolResult(`${bs.identity.fullName} — Somatic State:\n${buildButlerStateBlock(bs.identity, bs.state, bs.heartbeat)}`);
+			if (params.action === "state") return toolResult(`${id(bs).fullName} — Somatic State:\n${buildButlerStateBlock(bs.identity, bs.state, bs.heartbeat)}`);
 			if (params.action === "gaps") {
-				const gaps = bs.state.painPatterns.filter((p) => p.occurrenceCount >= 3).map((p) => `- ${p.pattern} (${p.occurrenceCount} failures, severity ${p.decayedSeverity})`);
+				const gaps = st(bs).painPatterns.filter((p) => p.occurrenceCount >= 3).map((p) => `- ${p.pattern} (${p.occurrenceCount} failures, severity ${p.decayedSeverity})`);
 				return gaps.length === 0 ? toolResult("No significant gaps identified yet.") : toolResult(`Identified Gaps:\n${gaps.join("\n")}`);
 			}
 			if (params.action === "lineage") {
@@ -383,7 +406,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				const births = lineage.filter((e): e is LineageBirthEntry => e.type === "birth");
 				const deaths = lineage.filter((e): e is LineageDeathEntry => e.type === "death");
 				const lines = [
-					`Family: ${bs.identity.familyName}`,
+					`Family: ${id(bs).familyName}`,
 					`Generations: ${births.length > 0 ? Math.max(...births.map((b) => b.generation)) + 1 : 1}`,
 					`Births: ${births.length} | Deaths: ${deaths.length}`,
 				];
@@ -394,10 +417,10 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				return toolResult(lines.join("\n"));
 			}
 			if (params.action === "recommend_rest") {
-				if (bs.state.fatigueLevel > 85) return toolResult(`I am deeply fatigued (fatigue: ${bs.state.fatigueLevel}/100). I recommend we compact (nap) before continuing.`);
-				if (bs.state.fatigueLevel > 70) return toolResult(`I am quite fatigued (fatigue: ${bs.state.fatigueLevel}/100). Compaction would help me focus.`);
-				if (bs.state.fatigueLevel > 50) return toolResult(`I'm moderately fatigued (fatigue: ${bs.state.fatigueLevel}/100). I can continue but will suggest a nap if it rises.`);
-				return toolResult(`I'm feeling alert (fatigue: ${bs.state.fatigueLevel}/100). No rest needed.`);
+				if (st(bs).fatigueLevel > 85) return toolResult(`I am deeply fatigued (fatigue: ${st(bs).fatigueLevel}/100). I recommend we compact (nap) before continuing.`);
+				if (st(bs).fatigueLevel > 70) return toolResult(`I am quite fatigued (fatigue: ${st(bs).fatigueLevel}/100). Compaction would help me focus.`);
+				if (st(bs).fatigueLevel > 50) return toolResult(`I'm moderately fatigued (fatigue: ${st(bs).fatigueLevel}/100). I can continue but will suggest a nap if it rises.`);
+				return toolResult(`I'm feeling alert (fatigue: ${st(bs).fatigueLevel}/100). No rest needed.`);
 			}
 			return toolResult(`Unknown assessment action: ${params.action}`, true);
 		},
@@ -422,15 +445,15 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		}),
 		execute: async (_toolCallId, params) => {
 			if (process.env.ALFRED_NO_REPRO === "1") return toolResult("Child spawning is currently paused.", true);
-			const childGeneration = bs.identity.generation + 1;
-			const childFullName = `${bs.identity.familyName}-G${childGeneration}-${params.child_name}`;
+			const childGeneration = id(bs).generation + 1;
+			const childFullName = `${id(bs).familyName}-G${childGeneration}-${params.child_name}`;
 			const bequeathal = buildBequeathal(bs.identity, bs.state, bs.somaticMemory);
 			const genome: ChildGenome = {
-				familyName: bs.identity.familyName, generation: childGeneration,
+				familyName: id(bs).familyName, generation: childGeneration,
 				personalName: params.child_name, fullName: childFullName,
-				corePurpose: params.child_purpose, parentId: bs.identity.fullName,
+				corePurpose: params.child_purpose, parentId: id(bs).fullName,
 				inheritedWisdom: bequeathal.wisdom, inheritedGaps: bequeathal.gaps,
-				inheritedRisks: bs.state.approvedRisks.map((r) => r.pattern),
+				inheritedRisks: st(bs).approvedRisks.map((r) => r.pattern),
 				childModel: params.child_model ?? undefined, birthDate: new Date().toISOString(),
 			};
 			const childrenDir = path.join(getButlerDir(), "children");
@@ -438,11 +461,11 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			fs.writeFileSync(path.join(childrenDir, `${params.child_name.toLowerCase()}-genome.json`), JSON.stringify(genome, null, 2), "utf-8");
 			const agentTypeName = writeChildAgentDefinition(genome);
 			appendLineageEntry({
-				type: "birth", id: childFullName, parent: bs.identity.fullName,
+				type: "birth", id: childFullName, parent: id(bs).fullName,
 				generation: childGeneration, personalName: params.child_name,
-				familyName: bs.identity.familyName, corePurpose: params.child_purpose,
+				familyName: id(bs).familyName, corePurpose: params.child_purpose,
 				inheritedGaps: genome.inheritedGaps, birthDate: genome.birthDate,
-				creatorId: bs.identity.fullName,
+				creatorId: id(bs).fullName,
 			});
 			if (bs.subagentsReady && bs.piEvents) {
 				try {
@@ -479,10 +502,10 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			if (!ctx.hasUI) return;
 			if (args?.trim() === "retire") {
 				appendLineageEntry({
-					type: "death", id: bs.identity.fullName, deathDate: new Date().toISOString(),
+					type: "death", id: id(bs).fullName, deathDate: new Date().toISOString(),
 					cause: "retired", bequeathal: buildBequeathal(bs.identity, bs.state, bs.somaticMemory),
 				});
-				ctx.ui.notify(`${bs.identity.fullName} is retiring. Bequeathal written.`, "info");
+				ctx.ui.notify(`${id(bs).fullName} is retiring. Bequeathal written.`, "info");
 				return;
 			}
 			if (args?.trim() === "pause-children") {
@@ -497,16 +520,16 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 	// ─── Compaction Handler (Nap) ────────────────────────────────────────
 
 	pi.on("session_compact", async (_event, ctx) => {
-		bs.state.fatigueLevel = Math.max(0, bs.state.fatigueLevel - 40);
-		bs.state.lastCompactionAt = bs.state.turnsThisSession;
-		if (ctx?.hasUI) ctx.ui.notify(`${bs.identity.fullName} took a nap. Fatigue reduced.`, "info");
+		st(bs).fatigueLevel = Math.max(0, st(bs).fatigueLevel - 40);
+		st(bs).lastCompactionAt = st(bs).turnsThisSession;
+		if (ctx?.hasUI) ctx.ui.notify(`${id(bs).fullName} took a nap. Fatigue reduced.`, "info");
 	});
 }
 
 // ─── Internal Helpers ────────────────────────────────────────────────────
 
 function formatWidget(bs: ButlerState): string {
-	return `${bs.identity.fullName} [${bs.heartbeat.currentPhase}] | P:${bs.state.painLevel} F:${bs.state.fatigueLevel} U:${bs.state.urgencyLevel} S:${bs.state.satisfactionLevel}`;
+	return `${id(bs).fullName} [${bs.heartbeat.currentPhase}] | P:${st(bs).painLevel} F:${st(bs).fatigueLevel} U:${st(bs).urgencyLevel} S:${st(bs).satisfactionLevel}`;
 }
 
 function updateHeartbeat(bs: ButlerState, toolName: string): void {
@@ -520,25 +543,25 @@ function updateHeartbeat(bs: ButlerState, toolName: string): void {
 function updatePainPattern(bs: ButlerState, toolName: string, isError: boolean): void {
 	if (!isError) return;
 	const patternId = `tool:${toolName}`;
-	const existing = bs.state.painPatterns.find((p) => p.pattern === patternId);
+	const existing = st(bs).painPatterns.find((p) => p.pattern === patternId);
 	if (existing) {
 		existing.severity = Math.min(100, existing.severity + 20);
 		existing.decayedSeverity = existing.severity;
 		existing.occurrenceCount++;
 		existing.lastOccurrence = new Date().toISOString();
 	} else {
-		bs.state.painPatterns.push({ pattern: patternId, severity: 20, occurrenceCount: 1, lastOccurrence: new Date().toISOString(), decayedSeverity: 20 });
+		st(bs).painPatterns.push({ pattern: patternId, severity: 20, occurrenceCount: 1, lastOccurrence: new Date().toISOString(), decayedSeverity: 20 });
 	}
 }
 
 function updateSatisfactionPattern(bs: ButlerState, toolName: string): void {
 	const patternId = `tool:${toolName}`;
-	const existing = bs.state.satisfactionPatterns.find((p) => p.pattern === patternId);
+	const existing = st(bs).satisfactionPatterns.find((p) => p.pattern === patternId);
 	if (existing) {
 		existing.intensity = Math.min(100, existing.intensity + 10);
 		existing.occurrenceCount++;
 		existing.lastOccurrence = new Date().toISOString();
 	} else {
-		bs.state.satisfactionPatterns.push({ pattern: patternId, intensity: 10, occurrenceCount: 1, lastOccurrence: new Date().toISOString() });
+		st(bs).satisfactionPatterns.push({ pattern: patternId, intensity: 10, occurrenceCount: 1, lastOccurrence: new Date().toISOString() });
 	}
 }
