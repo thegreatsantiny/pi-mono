@@ -131,8 +131,8 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	}
 	private listContainer: Container;
 	private footerText: Text;
-  private callbacks: ModelsCallbacks;
-  private isDirty = false;
+	private callbacks: ModelsCallbacks;
+	private isDirty = false;
 
 	constructor(config: ModelsConfig, callbacks: ModelsCallbacks) {
 		super();

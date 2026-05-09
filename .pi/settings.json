@@ -1,5 +1,9 @@
 {
   "packages": [
-    "npm:@tintinweb/pi-subagents"
-  ]
+    "npm:@tintinweb/pi-subagents",
+    "npm:@samfp/pi-memory"
+  ],
+  "pi-memory": {
+    "localPath": ".pi/memory"
+  }
 }

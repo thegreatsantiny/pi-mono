@@ -118,8 +118,7 @@ const PAIN_DECAY_BETWEEN_SESSIONS = 0.5;
 const STATE_ENTRY_TYPE = "butler-state";
 
 // Memory capacity
-const MEMORY_CAPACITY = 2000;
-const USER_PROFILE_CAPACITY = 1000;
+const SOMATIC_MEMORY_CAPACITY = 2000;
 
 // Heartbeat
 const HEARTBEAT_WINDOW = 5;
@@ -183,13 +182,6 @@ function getPurposePath(): string {
 	return path.join(getBaseDir(), ".pi", "butlers", "purpose.txt");
 }
 
-function getMemoryPath(): string {
-	return path.join(getButlerDir(), "memory.md");
-}
-
-function getUserProfilePath(): string {
-	return path.join(getButlerDir(), "user-profile.md");
-}
 
 function getLineagePath(): string {
 	return path.join(getButlerDir(), "lineage.jsonl");
@@ -197,6 +189,9 @@ function getLineagePath(): string {
 
 function getAgentsDir(): string {
 	return path.join(getBaseDir(), ".pi", "agents");
+}
+function getSomaticMemoryPath(): string {
+	return path.join(getButlerDir(), "somatic-memory.md");
 }
 
 // ─── Identity ─────────────────────────────────────────────────────────────
@@ -234,34 +229,18 @@ function persistIdentity(identity: ButlerIdentity): void {
 
 // ─── Memory ───────────────────────────────────────────────────────────────
 
-const DEFAULT_MEMORY = `# Pennyworth-G0-Alfred — Memory
+const DEFAULT_SOMATIC_MEMORY = `# Somatic Memory — Permanent Lessons & Known Risks
 
-## Environment
-- Machine: (not yet discovered)
-- Key dirs: (not yet discovered)
-- Active providers: (not yet discovered)
+## Permanent Lessons (pain that doesn't decay)
+- (none yet — these are things you learned the hard way)
 
-## Conventions
-- (none recorded yet)
+## Approved Risks (human confirmed these are acceptable)
+- (none approved yet)
 
-## Lessons Learned
-- (none recorded yet)
-
-## Active Gaps
+## Identified Gaps (what you cannot do)
 - (none identified yet)
 `;
 
-const DEFAULT_USER_PROFILE = `# User Profile — Shaun
-
-## Preferences
-- (not yet discovered)
-
-## Communication Style
-- (not yet discovered)
-
-## Working Patterns
-- (not yet discovered)
-`;
 
 function loadOrCreateFile(filePath: string, defaultContent: string): string {
 	if (fs.existsSync(filePath)) {
@@ -271,14 +250,11 @@ function loadOrCreateFile(filePath: string, defaultContent: string): string {
 	return defaultContent;
 }
 
-function persistMemory(content: string): void {
-	fs.writeFileSync(getMemoryPath(), content, "utf-8");
-}
 
-function persistUserProfile(content: string): void {
-	fs.writeFileSync(getUserProfilePath(), content, "utf-8");
-}
 
+function persistSomaticMemory(content: string): void {
+	fs.writeFileSync(getSomaticMemoryPath(), content, "utf-8");
+}
 // ─── Lineage ─────────────────────────────────────────────────────────────
 
 function appendLineageEntry(entry: LineageEntry): void {
@@ -304,9 +280,9 @@ function hasBirthEntry(id: string): boolean {
 	return readLineage().some((e) => e.type === "birth" && e.id === id);
 }
 
-function buildBequeathal(identity: ButlerIdentity, state: SomaticState, memory: string): LineageDeathEntry["bequeathal"] {
+function buildBequeathal(identity: ButlerIdentity, state: SomaticState, somaticMemory: string): LineageDeathEntry["bequeathal"] {
 	// Extract wisdom from memory — top lessons learned
-	const wisdomMatches = memory.match(/^- (.+)$/gm) ?? [];
+	const wisdomMatches = somaticMemory.match(/^- (.+)$/gm) ?? [];
 	const wisdom = wisdomMatches
 		.map((m) => m.replace(/^- /, ""))
 		.filter((w) => !w.includes("(none recorded") && !w.includes("not yet discovered") && !w.includes("(none identified"))
@@ -582,8 +558,7 @@ const NEGATIVE_FEEDBACK = /\b(wrong|not what i meant|that's incorrect|nope|bad|t
 export default function somaticButlerExtension(pi: ExtensionAPI) {
 	let identity: ButlerIdentity;
 	let state: SomaticState;
-	let memory: string;
-	let userProfile: string;
+	let somaticMemory: string;
 	let heartbeat: HeartbeatState = {
 		recentToolNames: [],
 		currentPhase: "steady",
@@ -663,13 +638,9 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				}
 			}
 
-			memory = loadOrCreateFile(
-				path.join(childButlerDir, "memory.md"),
-				DEFAULT_MEMORY.replace("Pennyworth-G0-Alfred", genome.fullName),
-			);
-			userProfile = loadOrCreateFile(
-				path.join(childButlerDir, "user-profile.md"),
-				DEFAULT_USER_PROFILE,
+			somaticMemory = loadOrCreateFile(
+				path.join(childButlerDir, "somatic-memory.md"),
+				DEFAULT_SOMATIC_MEMORY.replace("Pennyworth-G0-Alfred", genome.fullName),
 			);
 
 			ctx.ui.notify(`${identity.fullName} (child of ${genome.parentId}) is waking up.`, "info");
@@ -693,8 +664,8 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		} else {
 			identity = loadOrCreateIdentity();
 			state = loadOrCreateState();
-			memory = loadOrCreateFile(getMemoryPath(), DEFAULT_MEMORY);
-			userProfile = loadOrCreateFile(getUserProfilePath(), DEFAULT_USER_PROFILE);
+			somaticMemory = loadOrCreateFile(getSomaticMemoryPath(), DEFAULT_SOMATIC_MEMORY);
+			
 		}
 
 		// Replay in-session state entries for branch-correct state
@@ -761,8 +732,8 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		const statePath = path.join(butlerDir, "state.json");
 		fs.writeFileSync(identityPath, JSON.stringify(identity, null, 2), "utf-8");
 		fs.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf-8");
-		persistMemory(memory);
-		persistUserProfile(userProfile);
+		persistSomaticMemory(somaticMemory);
+		
 
 		// Regular shutdown = sleep, not death.
 		// Death (with bequeathal) only happens on explicit retirement or context overflow.
@@ -862,7 +833,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				id: identity.fullName,
 				deathDate: new Date().toISOString(),
 				cause: "context-overflow",
-				bequeathal: buildBequeathal(identity, state, memory),
+				bequeathal: buildBequeathal(identity, state, somaticMemory),
 			};
 			appendLineageEntry(deathEntry);
 			state._overflowDeathWritten = true;
@@ -920,9 +891,9 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 		if (POSITIVE_FEEDBACK.test(text)) {
 			state.satisfactionLevel = Math.min(100, state.satisfactionLevel + 25);
-			if (!memory.includes("User gave positive feedback")) {
-				memory = memory.replace(
-					"## Lessons Learned\n- (none recorded yet)",
+			if (!somaticMemory.includes("User gave positive feedback")) {
+				somaticMemory = somaticMemory.replace(
+					"## Permanent Lessons (pain that doesn't decay)\n- (none yet",
 					"## Lessons Learned\n- User gives direct positive feedback when satisfied",
 				);
 			}
@@ -931,16 +902,16 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		if (NEGATIVE_FEEDBACK.test(text)) {
 			state.painLevel = Math.min(100, state.painLevel + 15);
 			const lessonText = text.slice(0, 80).replace(/\n/g, " ");
-			const lessonLine = `- User corrected approach: "${lessonText}"`;
-			if (!memory.includes(lessonLine)) {
-				memory = memory.replace(
-					"## Lessons Learned\n- (none recorded yet)",
+			const lessonLine = `- Human correction: "${lessonText}"`;
+			if (!somaticMemory.includes(lessonLine)) {
+				somaticMemory = somaticMemory.replace(
+					"## Permanent Lessons (pain that doesn't decay)\n- (none yet",
 					`## Lessons Learned\n${lessonLine}`,
 				);
 				// If placeholder was already replaced, append to the section instead
-				if (!memory.includes(lessonLine)) {
-					memory = memory.replace(
-						"## Active Gaps",
+				if (!somaticMemory.includes(lessonLine)) {
+					somaticMemory = somaticMemory.replace(
+						"## Identified Gaps",
 						`${lessonLine}\n\n## Active Gaps`,
 					);
 				}
@@ -978,27 +949,20 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 			// Load child-specific memory/profile or use defaults
 			const childButlerDir = path.join(getBaseDir(), ".pi", "butlers", genome.personalName.toLowerCase());
-			const childMemoryPath = path.join(childButlerDir, "memory.md");
-			const childUserProfilePath = path.join(childButlerDir, "user-profile.md");
-
-			memory = loadOrCreateFile(childMemoryPath, DEFAULT_MEMORY.replace("Pennyworth-G0-Alfred", genome.fullName));
-			userProfile = loadOrCreateFile(childUserProfilePath, DEFAULT_USER_PROFILE);
+			const childMemoryPath = path.join(childButlerDir, "somatic-memory.md");
+			
+			somaticMemory = loadOrCreateFile(childMemoryPath, DEFAULT_SOMATIC_MEMORY.replace("Pennyworth-G0-Alfred", genome.fullName));
+			
 		}
 
 		const stateBlock = buildButlerStateBlock(identity, state, heartbeat);
 
 		let memoryBlock = "";
-		if (memory.trim()) {
-			const memOver = memory.length > MEMORY_CAPACITY;
-			const memUsage = `${memory.length}/${MEMORY_CAPACITY}${memOver ? " OVER CAPACITY — consolidate now" : ""}`;
-			memoryBlock += `\n\n═══ BUTLER MEMORY (${memUsage} chars) ═══\n${memory.trim()}\n═══ END BUTLER MEMORY ═══`;
+		if (somaticMemory.trim()) {
+			const memOver = somaticMemory.length > SOMATIC_MEMORY_CAPACITY;
+			const memUsage = `${somaticMemory.length}/${SOMATIC_MEMORY_CAPACITY}${memOver ? " OVER CAPACITY — consolidate now" : ""}`;
+			memoryBlock += `\n\n═══ SOMATIC MEMORY (${memUsage} chars) ═══\n${somaticMemory.trim()}\n═══ END SOMATIC MEMORY ═══`;
 		}
-		if (userProfile.trim()) {
-			const profileOver = userProfile.length > USER_PROFILE_CAPACITY;
-			const profileUsage = `${userProfile.length}/${USER_PROFILE_CAPACITY}${profileOver ? " OVER CAPACITY — consolidate now" : ""}`;
-			memoryBlock += `\n\n═══ USER PROFILE (${profileUsage} chars) ═══\n${userProfile.trim()}\n═══ END USER PROFILE ═══`;
-		}
-
 		return { systemPrompt: event.systemPrompt + "\n\n" + stateBlock + memoryBlock };
 	});
 
@@ -1006,32 +970,30 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 	const butlerMemorySchema = Type.Object({
 		action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove"), Type.Literal("consolidate")], {
-			description: "Action to perform on memory",
+			description: "Action to perform on somatic memory",
 		}),
-		target: Type.Union([Type.Literal("memory"), Type.Literal("user")], {
-			description: "Which file to modify: memory (your notes) or user (user profile)",
-		}),
-		section: Type.Optional(Type.String({ description: "Section heading (e.g., 'Lessons Learned', 'Preferences')" })),
+		target: Type.Literal("somatic", { description: "Somatic memory file" }),
+	section: Type.Optional(Type.String({ description: "Section heading (e.g., 'Permanent Lessons', 'Approved Risks')" })),
 		old_text: Type.Optional(Type.String({ description: "For replace/remove: substring to match" })),
 		content: Type.Optional(Type.String({ description: "For add/replace: the new entry text" })),
 	});
 	type ButlerMemoryInput = Static<typeof butlerMemorySchema>;
 
 	pi.registerTool({
-		name: "butler_memory",
-		label: "Butler Memory",
-		description: "Manage your persistent memory (memory.md) or user profile (user-profile.md). Use 'add' to add an entry to a section, 'replace' to update existing text, 'remove' to delete an entry, and 'consolidate' to compress memory when over capacity.",
-		promptSnippet: "butler_memory — manage persistent memory and user profile",
+		name: "butler_somatic_memory",
+		label: "Butler Somatic Memory",
+		description: "Manage your somatic memory — permanent lessons, approved risks, and identified gaps. Cognitive memory (preferences, patterns, corrections) is handled by pi-memory. Use 'add' to add, 'replace' to update, 'remove' to delete.",
+		promptSnippet: "butler_somatic_memory — manage somatic memory (permanent lessons, risks, gaps)",
 		promptGuidelines: [
-			"Use butler_memory to record important discoveries, user preferences, and lessons learned.",
-			"Consolidate memory when it approaches capacity to keep it focused and relevant.",
+			"Use butler_somatic_memory to record permanent somatic lessons, approved risks, and identified gaps.",
+			"For cognitive memory (preferences, conventions, project facts), use memory_remember from pi-memory instead.",
 		],
 		parameters: butlerMemorySchema,
 		execute: async (_toolCallId, params: ButlerMemoryInput) => {
-			const targetContent = params.target === "memory" ? memory : userProfile;
-			const capacity = params.target === "memory" ? MEMORY_CAPACITY : USER_PROFILE_CAPACITY;
-			const persistFn = params.target === "memory" ? persistMemory : persistUserProfile;
-			const targetName = params.target === "memory" ? "memory.md" : "user-profile.md";
+			const targetContent = somaticMemory;
+			const capacity = SOMATIC_MEMORY_CAPACITY;
+			const persistFn = persistSomaticMemory;
+			const targetName = "somatic-memory.md";
 
 			if (params.action === "add") {
 				if (!params.section || !params.content) {
@@ -1052,7 +1014,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				}
 
 				const newContent = lines.join("\n");
-				if (params.target === "memory") { memory = newContent; } else { userProfile = newContent; }
+				somaticMemory = newContent;
 				persistFn(newContent);
 				return toolResult(`Added to ${params.section} in ${targetName}. Size: ${newContent.length}/${capacity} chars.`);
 			}
@@ -1065,7 +1027,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 					return toolResult(`Error: Could not find specified text in ${targetName}.`, true);
 				}
 				const newContent = targetContent.replace(params.old_text, params.content);
-				if (params.target === "memory") { memory = newContent; } else { userProfile = newContent; }
+				somaticMemory = newContent;
 				persistFn(newContent);
 				return toolResult(`Replaced in ${targetName}. Size: ${newContent.length}/${capacity} chars.`);
 			}
@@ -1078,7 +1040,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 					return toolResult(`Error: Could not find specified text in ${targetName}.`, true);
 				}
 				const newContent = targetContent.replace(params.old_text, "").replace(/\n{3,}/g, "\n\n");
-				if (params.target === "memory") { memory = newContent; } else { userProfile = newContent; }
+				somaticMemory = newContent;
 				persistFn(newContent);
 				return toolResult(`Removed from ${targetName}. Size: ${newContent.length}/${capacity} chars.`);
 			}
@@ -1185,7 +1147,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 			const childGeneration = identity.generation + 1;
 			const childFullName = `${identity.familyName}-G${childGeneration}-${params.child_name}`;
-			const bequeathal = buildBequeathal(identity, state, memory);
+			const bequeathal = buildBequeathal(identity, state, somaticMemory);
 
 			// Build and persist child genome
 			const genome: ChildGenome = {
@@ -1297,7 +1259,7 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 			if (args?.trim() === "retire") {
 				// Graceful retirement — write bequeathal and shutdown
-				const bequeathal = buildBequeathal(identity, state, memory);
+				const bequeathal = buildBequeathal(identity, state, somaticMemory);
 				const deathEntry: LineageDeathEntry = {
 					type: "death",
 					id: identity.fullName,
