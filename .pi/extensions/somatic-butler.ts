@@ -265,6 +265,22 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 
 		if (ctx.hasUI) {
 			ctx.ui.setWidget("butler-status", [formatWidget(bs)]);
+			// Proactive: check for worker findings from previous sessions
+			const familyContextPath = path.join(getButlerDir(), "family-context.json");
+			if (fs.existsSync(familyContextPath)) {
+				try {
+					const fc = JSON.parse(fs.readFileSync(familyContextPath, "utf-8")) as { findings: { workerName: string; success: boolean; output?: string; completedAt: string }[] };
+					if (fc.findings.length > 0) {
+						const recent = fc.findings.filter((f) => {
+							const hoursAgo = (Date.now() - new Date(f.completedAt).getTime()) / (1000 * 60 * 60);
+							return hoursAgo < 24;
+						});
+						if (recent.length > 0) {
+							ctx.ui.notify(`📋 ${recent.length} worker finding(s) from recent sessions. Check family-context.json for details.`, "info");
+						}
+					}
+				} catch { /* corrupted family context */ }
+			}
 		}
 	});
 
@@ -798,6 +814,19 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		st(bs).fatigueLevel = Math.max(0, st(bs).fatigueLevel - 40);
 		st(bs).lastCompactionAt = st(bs).turnsThisSession;
 		if (ctx?.hasUI) ctx.ui.notify(`${id(bs).fullName} took a nap. Fatigue reduced.`, "info");
+	});
+
+	// ─── Proactive Behavior ────────────────────────────────────────────
+	pi.on("message_end", async (_event, ctx) => {
+		// Proactive check: if critical gaps exist and we haven't suggested hiring yet this session,
+		// offer a delegation suggestion. Only fires once per session to avoid nagging.
+		const criticalGaps = st(bs).identifiedGaps.filter((g) => g.severity === "critical");
+		if (criticalGaps.length > 0 && st(bs).turnsThisSession <= 2 && ctx?.hasUI) {
+			ctx.ui.notify(
+				`💡 I've identified ${criticalGaps.length} critical gap(s). Consider using butler_hire to delegate.`,
+				"info",
+			);
+		}
 	});
 }
 
