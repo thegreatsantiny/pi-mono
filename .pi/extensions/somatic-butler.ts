@@ -90,24 +90,49 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 		});
 
 		bs.piEvents.on("subagents:completed", (data: unknown) => {
-			const result = data as { id?: string; agentType?: string; success?: boolean; output?: string };
-			if (result.agentType?.startsWith("butler-")) {
+			const r = data as { id?: string; type?: string; description?: string; success?: boolean; result?: string; tokens?: { input: number; output: number; total: number }; toolUses?: number; durationMs?: number };
+			if (r.type?.startsWith("butler-")) {
 				// Temp workers report findings to family context (not lineage)
 				const familyContextPath = path.join(getButlerDir(), "family-context.json");
-				let familyContext: { activeWorkers: unknown[]; findings: { workerName: string; completedAt: string; success: boolean; output?: string }[] } = { activeWorkers: [], findings: [] };
+				let familyContext: { activeWorkers: { name: string; fullName: string; task: string; hiredAt: string }[]; findings: { workerName: string; completedAt: string; success: boolean; output?: string; tokens?: number; toolUses?: number; durationMs?: number }[] } = { activeWorkers: [], findings: [] };
 				if (fs.existsSync(familyContextPath)) {
 					try { familyContext = JSON.parse(fs.readFileSync(familyContextPath, "utf-8")); } catch { /* corrupted */ }
 				}
-				const workerName = result.agentType.replace("butler-", "");
+				const workerName = r.type.replace("butler-", "");
 				familyContext.activeWorkers = familyContext.activeWorkers.filter(
-					(w) => (w as { name?: string }).name !== workerName,
+					(w) => w.name !== workerName,
 				);
 				familyContext.findings.push({
 					workerName,
 					completedAt: new Date().toISOString(),
-					success: result.success ?? false,
-					output: result.output?.slice(0, 500),
+					success: r.result !== undefined,
+					output: r.result?.slice(0, 1000),
+					tokens: r.tokens?.total,
+					toolUses: r.toolUses,
+					durationMs: r.durationMs,
 				});
+				fs.writeFileSync(familyContextPath, JSON.stringify(familyContext, null, 2), "utf-8");
+				// Pain from failed workers — Alfred feels it when a hire doesn't work out
+				if (!r.result) {
+					st(bs).painLevel = Math.min(100, st(bs).painLevel + 10);
+				} else {
+					st(bs).satisfactionLevel = Math.min(100, st(bs).satisfactionLevel + 15);
+				}
+			}
+		});
+		// Track failed workers too
+		bs.piEvents.on("subagents:failed", (data: unknown) => {
+			const r = data as { type?: string; error?: string; status?: string };
+			if (r.type?.startsWith("butler-")) {
+				st(bs).painLevel = Math.min(100, st(bs).painLevel + 15);
+				const familyContextPath = path.join(getButlerDir(), "family-context.json");
+				let familyContext: { activeWorkers: { name: string }[]; findings: { workerName: string; completedAt: string; success: boolean; output?: string }[] } = { activeWorkers: [], findings: [] };
+				if (fs.existsSync(familyContextPath)) {
+					try { familyContext = JSON.parse(fs.readFileSync(familyContextPath, "utf-8")); } catch { /* corrupted */ }
+				}
+				const workerName = r.type.replace("butler-", "");
+				familyContext.activeWorkers = familyContext.activeWorkers.filter((w) => w.name !== workerName);
+				familyContext.findings.push({ workerName, completedAt: new Date().toISOString(), success: false, output: `Failed: ${r.error ?? r.status ?? "unknown error"}` });
 				fs.writeFileSync(familyContextPath, JSON.stringify(familyContext, null, 2), "utf-8");
 			}
 		});
@@ -686,14 +711,23 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 			"Choose a descriptive worker_name that reflects the task (e.g., 'scout', 'fixer', 'auditor').",
 			"Workers are temporary — they don't inherit Alfred's soul or lineage.",
 			"For succession (Alfred passing the torch), use butler_bequeath instead.",
+			"Use isolation: 'worktree' for workers that modify files — changes come back as a git branch.",
+			"Set max_turns for bounded tasks to prevent runaway workers.",
+			"Use tools_disallowed: ['write', 'edit'] for read-only scout workers.",
+			"After hiring, use get_subagent_result to check status or steer_subagent to redirect mid-run.",
 		],
 		parameters: Type.Object({
 			worker_name: Type.String({ description: "Name for the temp worker (e.g., 'scout', 'fixer', 'auditor')" }),
 			task: Type.String({ description: "The specific task for the worker" }),
-			tools_allowed: Type.Optional(Type.Array(Type.String()), { description: "Tools the worker may use (default: all)" }),
-			tools_disallowed: Type.Optional(Type.Array(Type.String()), { description: "Tools the worker may NOT use" }),
-			worker_model: Type.Optional(Type.String({ description: "Model for the worker (default: same as parent)" })),
+			tools_allowed: Type.Optional(Type.Array(Type.String()), { description: "Tools the worker may use (default: all). Built-in tools: read, bash, edit, write, grep, find, ls" }),
+			tools_disallowed: Type.Optional(Type.Array(Type.String()), { description: "Tools the worker may NOT use (e.g., ['write', 'edit'] for read-only scouts)" }),
+			worker_model: Type.Optional(Type.String({ description: "Model for the worker (default: same as parent). Fuzzy names like 'haiku', 'sonnet' work." })),
 			run_in_background: Type.Optional(Type.Boolean({ description: "Run worker in background (default: true)" })),
+			isolation: Type.Optional(Type.Literal("worktree", { description: "Run in an isolated git worktree — safe parallel file modifications. Changes saved to a branch on completion." })),
+			max_turns: Type.Optional(Type.Number({ description: "Max agentic turns before graceful shutdown (default: unlimited). Use for bounded tasks." })),
+			thinking: Type.Optional(Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" })),
+			inherit_context: Type.Optional(Type.Boolean({ description: "Fork parent conversation into the worker (default: false). Useful for tasks needing full conversation context." })),
+			memory_scope: Type.Optional(Type.String({ description: "Persistent memory scope: 'project' (.pi/agent-memory/), 'local' (gitignored), 'user' (global). Empty = no memory." })),
 		}),
 		execute: async (_toolCallId, params) => {
 			const workerFullName = `${id(bs).familyName}-Worker-${params.worker_name}`;
@@ -714,6 +748,8 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 				isWorker: true,
 				toolsAllowed: params.tools_allowed,
 				toolsDisallowed: params.tools_disallowed,
+				isolation: params.isolation,
+				memoryScope: params.memory_scope as "project" | "local" | "user" | undefined,
 			};
 			const childrenDir = path.join(getButlerDir(), "children");
 			fs.mkdirSync(childrenDir, { recursive: true });
@@ -740,18 +776,24 @@ export default function somaticButlerExtension(pi: ExtensionAPI) {
 							const r = reply as { success: boolean; data?: { id: string }; error?: string };
 							resolve({ success: r.success, agentId: r.data?.id, error: r.error });
 						});
-						bs.piEvents!.emit("subagents:rpc:spawn", {
-							requestId,
-							type: agentTypeName,
-							prompt: params.task,
-							options: {
+						const spawnOpts: Record<string, unknown> = {
 								description: `${workerFullName}: ${params.task}`,
 								run_in_background: params.run_in_background ?? true,
-							},
-						});
+							};
+							if (params.isolation) spawnOpts.isolation = params.isolation;
+							if (params.max_turns) spawnOpts.maxTurns = params.max_turns;
+							if (params.thinking) spawnOpts.thinkingLevel = params.thinking;
+							if (params.inherit_context) spawnOpts.inheritContext = params.inherit_context;
+							if (params.worker_model) spawnOpts.model = params.worker_model;
+							bs.piEvents!.emit("subagents:rpc:spawn", {
+								requestId,
+								type: agentTypeName,
+								prompt: params.task,
+								options: spawnOpts,
+							});
 					});
 					if (spawned.success && spawned.agentId) {
-						return toolResult(`Worker ${params.worker_name} hired and spawned!\nAgent ID: ${spawned.agentId}\nTask: ${params.task}\nStatus: active in family context`);
+						return toolResult(`Worker ${params.worker_name} hired and spawned!\nAgent ID: ${spawned.agentId}\nTask: ${params.task}\n${params.isolation ? `Isolation: worktree\n` : ""}Status: active in family context\n\nUse get_subagent_result to check status, steer_subagent to redirect mid-run.`);
 					}
 					return toolResult(`Worker genome and agent definition written, but RPC spawn failed: ${spawned.error}\nActivate manually: Agent({ subagent_type: "${agentTypeName}", prompt: "${params.task}" })`);
 				} catch (err) {

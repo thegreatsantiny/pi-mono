@@ -126,6 +126,10 @@ export interface ChildGenome {
 	toolsAllowed?: string[];
 	/** Tools this agent is NOT allowed to use (territory restriction). */
 	toolsDisallowed?: string[];
+	/** Isolation mode — "worktree" runs in a temp git worktree. */
+	isolation?: "worktree";
+	/** Persistent memory scope — workers can have cross-session memory. */
+	memoryScope?: "project" | "local" | "user";
 }
 
 // ─── Heartbeat ────────────────────────────────────────────────────────────

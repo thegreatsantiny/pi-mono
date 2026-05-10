@@ -262,6 +262,18 @@ export function writeChildAgentDefinition(genome: ChildGenome): string {
 	if (genome.toolsDisallowed && genome.toolsDisallowed.length > 0) {
 		frontmatter.push(`disallowed_tools: ${JSON.stringify(genome.toolsDisallowed)}`);
 	}
+	// Isolation — worktree for safe parallel file modifications
+	if (genome.isolation) {
+		frontmatter.push(`isolation: ${genome.isolation}`);
+	}
+	// Persistent memory — workers can accumulate knowledge across sessions
+	if (genome.memoryScope) {
+		frontmatter.push(`memory: ${genome.memoryScope}`);
+	}
+	// Max turns — bounded tasks prevent runaway workers
+	if (genome.isWorker) {
+		frontmatter.push("max_turns: 30");
+	}
 
 	let systemPrompt: string;
 	if (genome.isWorker) {
